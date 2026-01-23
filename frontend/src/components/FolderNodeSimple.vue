@@ -292,10 +292,6 @@ const handleHeaderDrop = (event) => {
   cursor: pointer;
   font-size: 0.85em;
   transition: all 0.2s;
-  opacity: 0;
-}
-
-.folder-header:hover .action-btn {
   opacity: 1;
 }
 
