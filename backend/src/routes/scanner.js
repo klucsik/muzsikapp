@@ -1,6 +1,7 @@
 import express from 'express';
 import fileScanner from '../scanner/fileScanner.js';
 import logger from '../utils/logger.js';
+import { authRequired } from '../middleware/auth.js';
 
 const { scanMusicLibrary, getScanStats, SUPPORTED_FORMATS } = fileScanner;
 
@@ -15,7 +16,7 @@ let scanProgress = null;
  * Trigger a music library scan
  * POST /api/scan
  */
-router.post('/', async (req, res) => {
+router.post('/', authRequired(), async (req, res) => {
   if (scanInProgress) {
     return res.status(409).json({
       error: 'Scan already in progress',

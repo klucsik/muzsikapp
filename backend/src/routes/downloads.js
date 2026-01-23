@@ -1,6 +1,7 @@
 import express from 'express';
 import logger from '../utils/logger.js';
 import downloadQueue from '../services/downloadQueue.js';
+import { authRequired } from '../middleware/auth.js';
 import { 
   searchYouTube, 
   isValidYouTubeUrl, 
@@ -91,7 +92,7 @@ router.get('/playlist', async (req, res) => {
  * POST /api/downloads/playlist
  * Body: { playlistUrl: string, folder_ids?: array }
  */
-router.post('/playlist', async (req, res) => {
+router.post('/playlist', authRequired(), async (req, res) => {
   try {
     const { playlistUrl, folder_ids } = req.body;
     
@@ -175,7 +176,7 @@ router.post('/playlist', async (req, res) => {
  * POST /api/downloads
  * Body: { youtubeUrl: string, folder_ids?: array }
  */
-router.post('/', async (req, res) => {
+router.post('/', authRequired(), async (req, res) => {
   try {
     const { youtubeUrl, folder_ids } = req.body;
     
@@ -221,7 +222,7 @@ router.post('/', async (req, res) => {
  * POST /api/downloads/from-search
  * Body: { video_id, title, channel, duration, thumbnail, url, folder_ids }
  */
-router.post('/from-search', async (req, res) => {
+router.post('/from-search', authRequired(), async (req, res) => {
   try {
     const { video_id, title, channel, duration, thumbnail, url, folder_ids } = req.body;
     
@@ -362,7 +363,7 @@ router.get('/:jobId', (req, res) => {
  * Cancel a download job
  * DELETE /api/downloads/:jobId
  */
-router.delete('/:jobId', (req, res) => {
+router.delete('/:jobId', authRequired(), (req, res) => {
   try {
     const { jobId } = req.params;
     
@@ -392,7 +393,7 @@ router.delete('/:jobId', (req, res) => {
  * Retry a failed download job
  * POST /api/downloads/:jobId/retry
  */
-router.post('/:jobId/retry', async (req, res) => {
+router.post('/:jobId/retry', authRequired(), async (req, res) => {
   try {
     const { jobId } = req.params;
     
@@ -422,7 +423,7 @@ router.post('/:jobId/retry', async (req, res) => {
  * Delete a completed/failed job
  * POST /api/downloads/:jobId/delete
  */
-router.post('/:jobId/delete', (req, res) => {
+router.post('/:jobId/delete', authRequired(), (req, res) => {
   try {
     const { jobId } = req.params;
     
@@ -452,7 +453,7 @@ router.post('/:jobId/delete', (req, res) => {
  * Clear all completed jobs
  * POST /api/downloads/clear/completed
  */
-router.post('/clear/completed', (req, res) => {
+router.post('/clear/completed', authRequired(), (req, res) => {
   try {
     const deletedCount = downloadQueue.clearCompleted();
     
@@ -474,7 +475,7 @@ router.post('/clear/completed', (req, res) => {
  * Clear all jobs from queue
  * POST /api/downloads/clear/all
  */
-router.post('/clear/all', (req, res) => {
+router.post('/clear/all', authRequired(), (req, res) => {
   try {
     const deletedCount = downloadQueue.clearAll();
     

@@ -49,6 +49,20 @@ const config = {
   addMusicUrl: process.env.ADD_MUSIC_URL || '',
   addMusicText: process.env.ADD_MUSIC_TEXT || 'Click "Continue" to open the music source in a new tab.',
   
+  // Authentication
+  auth: {
+    password: process.env.AUTH_PASSWORD || '',
+    jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-in-production',
+    tokenExpiresIn: 604800, // 1 week in seconds
+    keycloak: {
+      url: process.env.AUTH_KEYCLOAK_URL || '',
+      realm: process.env.AUTH_KEYCLOAK_REALM || '',
+      clientId: process.env.AUTH_KEYCLOAK_CLIENT_ID || '',
+      clientSecret: process.env.AUTH_KEYCLOAK_CLIENT_SECRET || '',
+      redirectUri: process.env.AUTH_KEYCLOAK_REDIRECT_URI || '',
+    },
+  },
+  
   // Computed
   isDevelopment: process.env.NODE_ENV === 'development',
   isProduction: process.env.NODE_ENV === 'production',

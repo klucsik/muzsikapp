@@ -1,26 +1,57 @@
 // API base URL - defaults to current origin for bundled deployment
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
+// Import auth service for token retrieval
+import { getToken } from './authService.js';
+
 /**
  * API client for backend communication
  */
 class ApiClient {
   constructor(baseUrl) {
     this.baseUrl = baseUrl;
+    this.authErrorCallback = null;
+  }
+  
+  /**
+   * Set callback for auth errors (401/403)
+   */
+  onAuthError(callback) {
+    this.authErrorCallback = callback;
   }
 
   async request(endpoint, options = {}) {
     const url = `${this.baseUrl}${endpoint}`;
+    
+    // Add auth token if available
+    const token = getToken();
+    const headers = {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    };
+    
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    
     const config = {
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
+      headers,
       ...options,
     };
 
     try {
       const response = await fetch(url, config);
+      
+      // Handle authentication errors
+      if (response.status === 401 || response.status === 403) {
+        const errorData = await response.json().catch(() => ({ error: 'Authentication required' }));
+        
+        if (this.authErrorCallback) {
+          this.authErrorCallback(response.status, errorData);
+        }
+        
+        throw new Error(errorData.message || errorData.error || 'Authentication required');
+      }
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
