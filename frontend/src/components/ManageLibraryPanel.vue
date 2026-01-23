@@ -420,7 +420,7 @@ const editTrack = async (track) => {
     });
   } catch (err) {
     console.error('Failed to load track data:', err);
-    alert('Failed to load track data');
+    toast.error('Failed to load track data');
   }
 };
 
@@ -446,7 +446,7 @@ const saveTrackMetadata = async () => {
     emit('refresh');
   } catch (err) {
     console.error('Failed to update track:', err);
-    alert('Failed to update track metadata');
+    toast.error('Failed to update track metadata');
   } finally {
     saving.value = false;
   }
@@ -499,7 +499,7 @@ const deleteTrack = async () => {
     emit('refresh');
   } catch (err) {
     console.error('Failed to delete track:', err);
-    alert('Failed to delete track');
+    toast.error('Failed to delete track');
   } finally {
     deleting.value = false;
   }

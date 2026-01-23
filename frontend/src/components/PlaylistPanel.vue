@@ -45,7 +45,7 @@
                 🔄 {{ loopPlaylist ? 'Looping' : 'Loop' }}
               </button>
               <button
-                @click="showSaveDialog = true"
+                @click="handleSaveToFolderClick"
                 :disabled="isEmpty || loading"
                 class="save-btn"
                 title="Save to folder"
@@ -111,6 +111,10 @@ const props = defineProps({
   currentTrack: {
     type: Object,
     default: null
+  },
+  isAuthenticated: {
+    type: Boolean,
+    default: false
   }
 });
 
@@ -118,6 +122,10 @@ const emit = defineEmits([
   'track-play',
   'playlist-updated'
 ]);
+
+// Import toast
+import { useToast } from '../composables/useToast.js';
+const toast = useToast();
 
 // Track current room and collection ID
 const currentRoomId = ref('room-1');
@@ -169,6 +177,17 @@ const loopPlaylist = ref(false);
 watch(tracks, (newTracks) => {
   emit('playlist-updated', newTracks);
 }, { deep: true });
+
+/**
+ * Handle Save to Folder button click
+ */
+const handleSaveToFolderClick = () => {
+  if (!props.isAuthenticated) {
+    toast.warning('Please log in to save playlists to folders');
+    return;
+  }
+  showSaveDialog.value = true;
+};
 
 /**
  * Handle room joined event
@@ -369,7 +388,7 @@ const saveToFolder = async () => {
     selectedFolderId.value = null;
   } catch (err) {
     console.error('Failed to save playlist to folder:', err);
-    alert('Failed to save playlist to folder');
+    toast.error('Failed to save playlist to folder');
   } finally {
     savingToFolder.value = false;
   }

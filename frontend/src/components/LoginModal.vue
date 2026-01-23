@@ -11,61 +11,38 @@
           {{ error }}
         </div>
         
-        <div class="auth-tabs">
-          <button 
-            :class="['tab-btn', { active: activeTab === 'local' }]"
-            @click="activeTab = 'local'"
-          >
-            Password
-          </button>
-          <button 
-            :class="['tab-btn', { active: activeTab === 'keycloak' }]"
-            @click="activeTab = 'keycloak'"
-          >
-            Keycloak
-          </button>
-        </div>
-        
-        <!-- Local Password Login -->
-        <div v-if="activeTab === 'local'" class="auth-section">
-          <form @submit.prevent="handleLocalLogin">
-            <div class="form-group">
-              <label for="password">Password</label>
-              <input
-                id="password"
-                type="password"
-                v-model="password"
-                placeholder="Enter password"
-                :disabled="isLoading"
-                required
-                autocomplete="current-password"
-              />
-            </div>
-            
-            <button 
-              type="submit"
-              class="login-submit-btn"
-              :disabled="isLoading || !password"
-            >
-              {{ isLoading ? 'Logging in...' : 'Login' }}
-            </button>
-          </form>
-        </div>
-        
-        <!-- Keycloak Login -->
-        <div v-if="activeTab === 'keycloak'" class="auth-section">
-          <p class="keycloak-info">
-            You will be redirected to Keycloak to complete authentication.
-          </p>
+        <form @submit.prevent="handleLocalLogin" class="login-form">
+          <div class="form-group">
+            <label for="password">Password</label>
+            <input
+              id="password"
+              type="password"
+              v-model="password"
+              placeholder="Enter password"
+              :disabled="isLoading"
+              autocomplete="current-password"
+            />
+          </div>
           
           <button 
-            class="keycloak-btn"
+            type="submit"
+            class="login-btn primary"
+            :disabled="isLoading || !password"
+          >
+            {{ isLoading ? 'Logging in...' : 'Login with Password' }}
+          </button>
+          
+          <div class="divider">or</div>
+          
+          <button 
+            type="button"
+            class="login-btn keycloak"
             @click="handleKeycloakLogin"
             :disabled="isLoading"
           >
             {{ isLoading ? 'Redirecting...' : 'Login with Keycloak' }}
           </button>
-        </div>
+        </form>
       </div>
     </div>
   </div>
@@ -81,7 +58,6 @@ export default {
   setup(props, { emit }) {
     const { isLoading, error, loginLocal, loginKeycloak, clearError } = useAuth();
     
-    const activeTab = ref('local');
     const password = ref('');
     
     const handleLocalLogin = async () => {
@@ -110,7 +86,6 @@ export default {
     };
     
     return {
-      activeTab,
       password,
       isLoading,
       error,
@@ -189,52 +164,22 @@ export default {
   font-size: 0.9rem;
 }
 
-.auth-tabs {
+.login-form {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1.5rem;
-}
-
-.tab-btn {
-  flex: 1;
-  padding: 0.75rem;
-  background: var(--bg-tertiary, #1a1a1a);
-  border: 1px solid var(--border-color, #444);
-  color: var(--text-secondary, #aaa);
-  cursor: pointer;
-  border-radius: 0.25rem;
-  font-size: 0.9rem;
-  transition: all 0.2s;
-}
-
-.tab-btn:hover {
-  background: var(--hover-bg, #333);
-}
-
-.tab-btn.active {
-  background: var(--primary-color, #4a90e2);
-  color: white;
-  border-color: var(--primary-color, #4a90e2);
-}
-
-.auth-section {
-  animation: fadeIn 0.2s;
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  flex-direction: column;
+  gap: 1rem;
 }
 
 .form-group {
-  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .form-group label {
-  display: block;
-  margin-bottom: 0.5rem;
   color: var(--text-primary, #fff);
   font-size: 0.9rem;
+  font-weight: 500;
 }
 
 .form-group input {
@@ -257,24 +202,68 @@ export default {
   cursor: not-allowed;
 }
 
-.login-submit-btn,
-.keycloak-btn {
+.login-btn {
   width: 100%;
   padding: 0.75rem;
-  background: var(--primary-color, #4a90e2);
-  color: white;
   border: none;
   border-radius: 0.25rem;
   font-size: 1rem;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: all 0.2s;
 }
 
-.login-submit-btn:hover:not(:disabled),
-.keycloak-btn:hover:not(:disabled) {
-  background: var(--primary-dark, #357abd);
+.login-btn.primary {
+  background: var(--primary-color, #4a90e2);
+  color: white;
 }
+
+.login-btn.primary:hover:not(:disabled) {
+  background: var(--primary-hover, #357abd);
+}
+
+.login-btn.keycloak {
+  background: var(--bg-tertiary, #1a1a1a);
+  color: var(--text-primary, #fff);
+  border: 1px solid var(--border-color, #444);
+}
+
+.login-btn.keycloak:hover:not(:disabled) {
+  background: var(--hover-bg, #333);
+  border-color: var(--primary-color, #4a90e2);
+}
+
+.login-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.divider {
+  text-align: center;
+  color: var(--text-secondary, #aaa);
+  font-size: 0.9rem;
+  position: relative;
+  margin: 0.5rem 0;
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 40%;
+  height: 1px;
+  background: var(--border-color, #444);
+}
+
+.divider::before {
+  left: 0;
+}
+
+.divider::after {
+  right: 0;
+}
+
 
 .login-submit-btn:disabled,
 .keycloak-btn:disabled {

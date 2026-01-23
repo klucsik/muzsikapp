@@ -17,8 +17,8 @@ export function useAuth() {
   /**
    * Initialize auth state (check if user is already logged in)
    */
-  const initialize = async () => {
-    if (initialized) {
+  const initialize = async (force = false) => {
+    if (initialized && !force) {
       return;
     }
     

@@ -157,6 +157,9 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import api from '../services/api';
+import { useToast } from '../composables/useToast.js';
+
+const toast = useToast();
 import websocket from '../services/websocket';
 
 const emit = defineEmits(['download-completed']);
@@ -206,7 +209,7 @@ const cancelJob = async (jobId) => {
     // Job will be removed via WebSocket event
   } catch (error) {
     console.error('Failed to cancel job:', error);
-    alert('Failed to cancel download: ' + error.message);
+    toast.error('Failed to cancel download: ' + error.message);
   }
 };
 
@@ -219,7 +222,7 @@ const retryJob = async (jobId) => {
     // Job will be updated via WebSocket event
   } catch (error) {
     console.error('Failed to retry job:', error);
-    alert('Failed to retry download: ' + error.message);
+    toast.error('Failed to retry download: ' + error.message);
   }
 };
 
@@ -232,7 +235,7 @@ const deleteJob = async (jobId) => {
     // Job will be removed via WebSocket event
   } catch (error) {
     console.error('Failed to delete job:', error);
-    alert('Failed to delete job: ' + error.message);
+    toast.error('Failed to delete job: ' + error.message);
   }
 };
 
@@ -247,7 +250,7 @@ const clearCompleted = async () => {
     // Queue will be updated via WebSocket event
   } catch (error) {
     console.error('Failed to clear completed jobs:', error);
-    alert('Failed to clear completed jobs: ' + error.message);
+    toast.error('Failed to clear completed jobs: ' + error.message);
   } finally {
     clearing.value = false;
   }
@@ -265,7 +268,7 @@ const clearAll = async () => {
     // Queue will be updated via WebSocket event
   } catch (error) {
     console.error('Failed to clear all jobs:', error);
-    alert('Failed to clear all jobs: ' + error.message);
+    toast.error('Failed to clear all jobs: ' + error.message);
     showClearAllConfirm.value = false;
   } finally {
     clearing.value = false;

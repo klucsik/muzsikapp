@@ -42,6 +42,7 @@
           <PlaylistPanel
             ref="playlistRef"
             :current-track="currentTrack"
+            :is-authenticated="isAuthenticated"
             @track-play="onPlayTrack"
           />
         </div>
@@ -83,6 +84,9 @@
         />
       </section>
     </main>
+    
+    <!-- Toast notifications -->
+    <ToastContainer />
   </div>
 </template>
 
@@ -94,9 +98,11 @@ import FolderManagerPanel from './components/FolderManagerPanel.vue';
 import PlaylistPanel from './components/PlaylistPanel.vue';
 import ManageLibraryPanel from './components/ManageLibraryPanel.vue';
 import LoginButton from './components/LoginButton.vue';
+import ToastContainer from './components/ToastContainer.vue';
 import api from './services/api';
 import websocket from './services/websocket';
 import { useAuth } from './composables/useAuth.js';
+import { useToast } from './composables/useToast.js';
 
 export default {
   name: 'App',
@@ -107,10 +113,12 @@ export default {
     PlaylistPanel,
     ManageLibraryPanel,
     LoginButton,
+    ToastContainer,
   },
   setup() {
-    // Initialize auth
+    // Initialize auth and toast
     const { initialize: initializeAuth, isAuthenticated, logout } = useAuth();
+    const toast = useToast();
     
     const currentTrackId = ref(null);
     const currentTrack = ref(null);
@@ -155,7 +163,7 @@ export default {
         currentTrack.value = track;
       } catch (error) {
         console.error('Failed to play track:', error);
-        alert('Failed to play track. Check console for details.');
+        toast.error('Failed to play track. Check console for details.');
       }
     };
 
@@ -316,6 +324,37 @@ export default {
     };
 
     onMounted(async () => {
+      // Check for Keycloak callback
+      const urlParams = new URLSearchParams(window.location.search);
+      const keycloakCode = urlParams.get('code');
+      
+      if (keycloakCode) {
+        // Handle Keycloak callback
+        try {
+          const { handleKeycloakCallback } = await import('./services/authService.js');
+          const result = await handleKeycloakCallback(keycloakCode);
+          
+          console.log('Keycloak callback result:', result);
+          console.log('Token stored in localStorage:', localStorage.getItem('auth_token') ? 'YES' : 'NO');
+          
+          // Clean up URL
+          window.history.replaceState({}, document.title, result.returnUrl || '/');
+          
+          toast.success('Successfully logged in via Keycloak');
+          
+          // Reinitialize auth to update state (force refresh)
+          console.log('Forcing auth re-initialization...');
+          await initializeAuth(true);
+          console.log('Auth state after re-init:', isAuthenticated.value);
+        } catch (error) {
+          console.error('Keycloak login failed:', error);
+          toast.error('Keycloak login failed: ' + error.message);
+          
+          // Clean up URL even on error
+          window.history.replaceState({}, document.title, '/');
+        }
+      }
+      
       // Initialize authentication
       await initializeAuth();
       
@@ -325,9 +364,9 @@ export default {
         if (status === 401) {
           // Token expired or invalid - logout
           logout();
-          alert('Your session has expired. Please log in again.');
+          toast.error('Your session has expired. Please log in again.');
         } else if (status === 403) {
-          alert('You do not have permission to perform this action. Please log in.');
+          toast.error('You do not have permission to perform this action.');
         }
       });
       

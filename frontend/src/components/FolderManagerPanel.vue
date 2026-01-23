@@ -2,7 +2,7 @@
   <div class="folder-manager-panel">
     <div class="folder-header">
       <h3>Folders</h3>
-      <button @click="showCreateDialog = true" class="create-btn">
+      <button @click="handleNewFolderClick" class="create-btn">
         + New Folder
       </button>
     </div>
@@ -18,6 +18,7 @@
         :folder-tracks="folderTracks"
         :current-track="currentTrack"
         :loading-tracks="loadingTracks"
+        :is-authenticated="isAuthenticated"
         @toggle="toggleFolder"
         @edit="startEditFolder"
         @delete="confirmDeleteFolder"
@@ -105,10 +106,18 @@ const props = defineProps({
   currentTrack: {
     type: Object,
     default: null
+  },
+  isAuthenticated: {
+    type: Boolean,
+    default: false
   }
 });
 
 const emit = defineEmits(['track-play']);
+
+// Import toast
+import { useToast } from '../composables/useToast.js';
+const toast = useToast();
 
 // Track current room
 const currentRoomId = ref('room-1');
@@ -158,6 +167,17 @@ const loadFolders = async () => {
 };
 
 /**
+ * Handle New Folder button click
+ */
+const handleNewFolderClick = () => {
+  if (!props.isAuthenticated) {
+    toast.warning('Please log in to create folders');
+    return;
+  }
+  showCreateDialog.value = true;
+};
+
+/**
  * Get root folders (folders without parents)
  */
 const rootFolders = computed(() => {
@@ -202,6 +222,10 @@ const toggleFolder = async (folder) => {
  * Start editing a folder
  */
 const startEditFolder = (folder) => {
+  if (!props.isAuthenticated) {
+    toast.warning('Please log in to edit folders');
+    return;
+  }
   editingFolder.value = folder;
   newFolderName.value = folder.name;
   parentFolderId.value = folder.parent_id;
@@ -228,7 +252,7 @@ const saveEditFolder = async () => {
     await loadFolders();
   } catch (err) {
     console.error('Failed to update folder:', err);
-    alert('Failed to update folder');
+    toast.error('Failed to update folder');
   }
 };
 
@@ -247,7 +271,7 @@ const createFolder = async () => {
     await loadFolders();
   } catch (err) {
     console.error('Failed to create folder:', err);
-    alert('Failed to create folder');
+    toast.error('Failed to create folder');
   }
 };
 
@@ -266,6 +290,10 @@ const closeDialogs = () => {
  * Confirm folder deletion
  */
 const confirmDeleteFolder = (folder) => {
+  if (!props.isAuthenticated) {
+    toast.warning('Please log in to delete folders');
+    return;
+  }
   folderToDelete.value = folder;
   showDeleteDialog.value = true;
 };
@@ -286,7 +314,7 @@ const deleteFolder = async () => {
     await loadFolders();
   } catch (err) {
     console.error('Failed to delete folder:', err);
-    alert('Failed to delete folder');
+    toast.error('Failed to delete folder');
   }
 };
 

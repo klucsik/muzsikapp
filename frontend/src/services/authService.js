@@ -135,7 +135,7 @@ export async function loginKeycloak() {
     const authUrl = new URL(`${url}/realms/${realm}/protocol/openid-connect/auth`);
     authUrl.searchParams.set('client_id', clientId);
     authUrl.searchParams.set('redirect_uri', redirectUri || window.location.origin + '/callback');
-    authUrl.searchParams.set('response_type', 'token'); // Implicit flow
+    authUrl.searchParams.set('response_type', 'code'); // Authorization code flow
     authUrl.searchParams.set('scope', 'openid');
     
     // Store current location to return after login
@@ -150,16 +150,16 @@ export async function loginKeycloak() {
 }
 
 /**
- * Handle Keycloak callback (exchange token)
+ * Handle Keycloak callback (exchange code for token)
  */
-export async function handleKeycloakCallback(keycloakToken) {
+export async function handleKeycloakCallback(code) {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/auth/keycloak-callback`, {
+    const response = await fetch(`${API_BASE_URL}/api/auth/keycloak-code`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ token: keycloakToken }),
+      body: JSON.stringify({ code }),
     });
     
     if (!response.ok) {
