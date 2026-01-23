@@ -1,5 +1,5 @@
 import express from 'express';
-import { generateLocalToken, validateKeycloakToken, validateToken } from '../services/authService.js';
+import { generateLocalToken, validateKeycloakToken, exchangeKeycloakCode, validateToken } from '../services/authService.js';
 import logger from '../utils/logger.js';
 import config from '../config/config.js';
 
@@ -76,6 +76,45 @@ router.post('/keycloak-callback', async (req, res) => {
     });
   } catch (error) {
     logger.error({ error: error.message }, 'Keycloak callback error');
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Keycloak authentication failed',
+    });
+  }
+});
+
+/**
+ * POST /api/auth/keycloak-code
+ * Exchange Keycloak authorization code for app token
+ */
+router.post('/keycloak-code', async (req, res) => {
+  try {
+    const { code, redirectUri } = req.body;
+    
+    if (!code) {
+      return res.status(400).json({
+        error: 'Bad request',
+        message: 'Authorization code is required',
+      });
+    }
+    
+    const appToken = await exchangeKeycloakCode(code, redirectUri || config.auth.keycloak.redirectUri);
+    
+    if (!appToken) {
+      return res.status(401).json({
+        error: 'Authentication failed',
+        message: 'Invalid or expired authorization code',
+      });
+    }
+    
+    logger.info('User authenticated via Keycloak code exchange');
+    
+    res.json({
+      token: appToken,
+      expiresIn: config.auth.tokenExpiresIn,
+    });
+  } catch (error) {
+    logger.error({ error: error.message }, 'Keycloak code exchange error');
     res.status(500).json({
       error: 'Internal server error',
       message: 'Keycloak authentication failed',

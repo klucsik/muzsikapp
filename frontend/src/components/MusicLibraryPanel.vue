@@ -136,10 +136,18 @@ const props = defineProps({
   currentTrack: {
     type: Object,
     default: null
+  },
+  isAuthenticated: {
+    type: Boolean,
+    default: false
   }
 });
 
 const emit = defineEmits(['track-play', 'open-manage-library']);
+
+// Import toast
+import { useToast } from '../composables/useToast.js';
+const toast = useToast();
 
 // Ordering state
 const orderBy = ref(localStorage.getItem('library-order-by') || 'title');
@@ -219,6 +227,10 @@ watch(tracks, () => {
 }, { deep: true });
 
 const handleManageLibraryClick = () => {
+  if (!props.isAuthenticated) {
+    toast.warning('Please log in to manage your library');
+    return;
+  }
   emit('open-manage-library');
 };
 

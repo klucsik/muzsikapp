@@ -30,6 +30,7 @@
           ▶
         </button>
         <button 
+          v-if="isAuthenticated"
           @click="$emit('edit', folder)" 
           title="Edit folder"
           class="action-btn"
@@ -37,6 +38,7 @@
           ✏️
         </button>
         <button 
+          v-if="isAuthenticated"
           @click="$emit('delete', folder)" 
           title="Delete folder"
           class="action-btn delete"
@@ -89,6 +91,7 @@
         @track-drop="$emit('track-drop', $event)"
         @track-reorder="$emit('track-reorder', $event)"
         @track-remove="$emit('track-remove', $event)"
+        :is-authenticated="isAuthenticated"
       />
     </div>
   </div>
@@ -126,6 +129,10 @@ const props = defineProps({
     default: null
   },
   loadingTracks: {
+    type: Boolean,
+    default: false
+  },
+  isAuthenticated: {
     type: Boolean,
     default: false
   }

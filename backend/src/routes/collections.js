@@ -191,11 +191,21 @@ export default () => {
   /**
    * POST /api/collections/:id/tracks
    * Add a track to a collection
+   * Auth: Required for folders, optional for playlists (including room playlists)
    */
-  router.post('/:id/tracks', authRequired(), (req, res) => {
+  router.post('/:id/tracks', (req, res) => {
     try {
       const db = getDb();
       logger.info({ collectionId: req.params.id, body: req.body }, '📌 POST /tracks request received');
+      
+      const collectionId = req.params.id;
+      const isPlaylist = collectionId === 'current-playlist' || collectionId.startsWith('current-playlist-room-');
+      
+      // Require auth for folders, but allow anyone to add to playlists
+      if (!isPlaylist && !req.user) {
+        return res.status(401).json({ error: 'Authentication required for folder operations' });
+      }
+      
       const { track_id, position } = req.body;
 
       if (!track_id) {
@@ -224,10 +234,20 @@ export default () => {
    * DELETE /api/collections/:id/tracks/:trackId
    * Remove a track from a collection
    * Optional query param: position (to remove specific instance when duplicates exist)
+   * Auth: Required for folders, optional for playlists
    */
-  router.delete('/:id/tracks/:trackId', authRequired(), (req, res) => {
+  router.delete('/:id/tracks/:trackId', (req, res) => {
     try {
       const db = getDb();
+      
+      const collectionId = req.params.id;
+      const isPlaylist = collectionId === 'current-playlist' || collectionId.startsWith('current-playlist-room-');
+      
+      // Require auth for folders, but allow anyone to modify playlists
+      if (!isPlaylist && !req.user) {
+        return res.status(401).json({ error: 'Authentication required for folder operations' });
+      }
+      
       const position = req.query.position !== undefined ? parseInt(req.query.position, 10) : null;
       
       const collection = collectionQueries.removeTrack(
@@ -250,10 +270,20 @@ export default () => {
   /**
    * PUT /api/collections/:id/tracks/:trackId/position
    * Reorder a track within a collection
+   * Auth: Required for folders, optional for playlists
    */
-  router.put('/:id/tracks/:trackId/position', authRequired(), (req, res) => {
+  router.put('/:id/tracks/:trackId/position', (req, res) => {
     try {
       const db = getDb();
+      
+      const collectionId = req.params.id;
+      const isPlaylist = collectionId === 'current-playlist' || collectionId.startsWith('current-playlist-room-');
+      
+      // Require auth for folders, but allow anyone to modify playlists
+      if (!isPlaylist && !req.user) {
+        return res.status(401).json({ error: 'Authentication required for folder operations' });
+      }
+      
       const { position } = req.body;
 
       if (position === undefined || position === null) {
@@ -280,10 +310,20 @@ export default () => {
   /**
    * DELETE /api/collections/:id/tracks
    * Clear all tracks from a collection
+   * Auth: Required for folders, optional for playlists
    */
-  router.delete('/:id/tracks', authRequired(), (req, res) => {
+  router.delete('/:id/tracks', (req, res) => {
     try {
       const db = getDb();
+      
+      const collectionId = req.params.id;
+      const isPlaylist = collectionId === 'current-playlist' || collectionId.startsWith('current-playlist-room-');
+      
+      // Require auth for folders, but allow anyone to clear playlists
+      if (!isPlaylist && !req.user) {
+        return res.status(401).json({ error: 'Authentication required for folder operations' });
+      }
+      
       const collection = collectionQueries.clearTracks(db, req.params.id);
       
       // Emit WebSocket event if this is the current playlist

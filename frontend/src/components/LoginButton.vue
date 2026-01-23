@@ -13,7 +13,7 @@
       class="logout-btn"
       @click="handleLogout"
       :disabled="isLoading"
-      :title="`Expires in ${formatExpiry()}`"
+      title="Click to logout"
     >
       ✅ Authenticated
     </button>

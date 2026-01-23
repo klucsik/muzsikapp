@@ -1,5 +1,4 @@
 import jwt from 'jsonwebtoken';
-import { Issuer } from 'openid-client';
 import config from '../config/config.js';
 import logger from '../utils/logger.js';
 
@@ -9,6 +8,18 @@ import logger from '../utils/logger.js';
 
 // Cache for Keycloak client
 let keycloakClient = null;
+let keycloakIssuer = null;
+let openidClient = null;
+
+/**
+ * Lazy load openid-client
+ */
+async function getOpenIdClient() {
+  if (!openidClient) {
+    openidClient = await import('openid-client');
+  }
+  return openidClient;
+}
 
 /**
  * Get JWT secret from config
@@ -66,7 +77,8 @@ export function validateLocalToken(token) {
     const secret = getJwtSecret();
     const decoded = jwt.verify(token, secret);
     
-    if (decoded.source === 'local' && decoded.authenticated) {
+    // Accept both 'local' and 'keycloak' source tokens
+    if ((decoded.source === 'local' || decoded.source === 'keycloak') && decoded.authenticated) {
       return decoded;
     }
     
@@ -93,19 +105,25 @@ async function getKeycloakClient() {
   }
   
   try {
+    // Dynamic import of openid-client
+    const oidc = await getOpenIdClient();
+    const { Issuer } = oidc;
+    
     const issuerUrl = `${url}/realms/${realm}`;
     logger.info({ issuerUrl }, 'Discovering Keycloak OIDC configuration');
     
-    const issuer = await Issuer.discover(issuerUrl);
-    keycloakClient = new issuer.Client({
+    keycloakIssuer = await Issuer.discover(issuerUrl);
+    keycloakClient = new keycloakIssuer.Client({
       client_id: clientId,
       client_secret: clientSecret,
+      redirect_uris: [config.auth.keycloak.redirectUri],
+      response_types: ['code'],
     });
     
     logger.info('Keycloak OIDC client initialized');
     return keycloakClient;
   } catch (error) {
-    logger.error({ error: error.message }, 'Failed to initialize Keycloak client');
+    logger.error({ error: error.message, stack: error.stack }, 'Failed to initialize Keycloak client');
     return null;
   }
 }
@@ -151,6 +169,80 @@ export async function validateKeycloakToken(keycloakToken) {
 }
 
 /**
+ * Exchange Keycloak authorization code for tokens and generate app JWT
+ * @param {string} code - Authorization code from Keycloak
+ * @param {string} redirectUri - Redirect URI used in the auth request
+ * @returns {string|null} App JWT token or null if invalid
+ */
+export async function exchangeKeycloakCode(code, redirectUri) {
+  const { url, realm, clientId, clientSecret } = config.auth.keycloak;
+  
+  if (!url || !realm || !clientId) {
+    logger.warn('Keycloak configuration incomplete - cannot exchange code');
+    return null;
+  }
+  
+  try {
+    logger.info({ code: code.substring(0, 10) + '...', redirectUri }, 'Exchanging authorization code for tokens');
+    
+    // Build token endpoint URL directly
+    const tokenEndpoint = `${url}/realms/${realm}/protocol/openid-connect/token`;
+    
+    // Exchange code for tokens using standard OAuth 2.0
+    const params = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: code,
+      redirect_uri: redirectUri,
+      client_id: clientId,
+      client_secret: clientSecret,
+    });
+    
+    const tokenResponse = await fetch(tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+    
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      logger.error({ status: tokenResponse.status, error: errorText }, 'Token exchange failed');
+      return null;
+    }
+    
+    const tokenSet = await tokenResponse.json();
+    
+    if (!tokenSet || !tokenSet.access_token) {
+      logger.warn('No access token received from Keycloak');
+      return null;
+    }
+    
+    // Decode the token to get claims (without verification, just for info)
+    const tokenParts = tokenSet.access_token.split('.');
+    const claims = JSON.parse(Buffer.from(tokenParts[1], 'base64').toString());
+    
+    // Token is valid, generate our own JWT
+    const payload = {
+      authenticated: true,
+      source: 'keycloak',
+      sub: claims.sub, // Keycloak user ID (but we don't use it for permissions)
+    };
+    
+    const secret = getJwtSecret();
+    const appToken = jwt.sign(payload, secret, {
+      expiresIn: config.auth.tokenExpiresIn,
+    });
+    
+    logger.info({ sub: claims.sub }, 'Generated app token from Keycloak code');
+    return appToken;
+  } catch (error) {
+    logger.error({ error: error.message, stack: error.stack }, 'Keycloak code exchange failed');
+    return null;
+  }
+}
+
+/**
  * Validate a token (try local first, then Keycloak format)
  * @param {string} token - JWT token to validate
  * @returns {object|null} Decoded token payload or null if invalid
@@ -186,5 +278,6 @@ export default {
   generateLocalToken,
   validateLocalToken,
   validateKeycloakToken,
+  exchangeKeycloakCode,
   validateToken,
 };
