@@ -19,6 +19,7 @@
           <span class="stat">{{ stats.tracks }} tracks</span>
           <span class="stat">{{ stats.clients }} clients</span>
         </div>
+        <LoginButton />
       </div>
     </header>
 
@@ -53,6 +54,7 @@
           <MusicLibraryPanel
             ref="libraryRef"
             :current-track="currentTrack"
+            :is-authenticated="isAuthenticated"
             @track-play="onAddTrackAndPlay"
             @open-manage-library="openManageLibrary"
           />
@@ -63,6 +65,7 @@
           <FolderManagerPanel
             ref="folderManagerRef"
             :current-track="currentTrack"
+            :is-authenticated="isAuthenticated"
             @track-play="onAddTrackAndPlay"
           />
         </div>
@@ -73,6 +76,7 @@
         <ManageLibraryPanel
           ref="manageLibraryRef"
           :current-track="currentTrack"
+          :is-authenticated="isAuthenticated"
           @close="closeManageLibrary"
           @refresh="handleRefresh"
           @track-play="onAddTrackAndPlay"
@@ -89,8 +93,10 @@ import MusicLibraryPanel from './components/MusicLibraryPanel.vue';
 import FolderManagerPanel from './components/FolderManagerPanel.vue';
 import PlaylistPanel from './components/PlaylistPanel.vue';
 import ManageLibraryPanel from './components/ManageLibraryPanel.vue';
+import LoginButton from './components/LoginButton.vue';
 import api from './services/api';
 import websocket from './services/websocket';
+import { useAuth } from './composables/useAuth.js';
 
 export default {
   name: 'App',
@@ -100,8 +106,12 @@ export default {
     FolderManagerPanel,
     PlaylistPanel,
     ManageLibraryPanel,
+    LoginButton,
   },
   setup() {
+    // Initialize auth
+    const { initialize: initializeAuth, isAuthenticated, logout } = useAuth();
+    
     const currentTrackId = ref(null);
     const currentTrack = ref(null);
     // Load saved room from localStorage or default to 'room-1'
@@ -305,7 +315,22 @@ export default {
       await loadStats();
     };
 
-    onMounted(() => {
+    onMounted(async () => {
+      // Initialize authentication
+      await initializeAuth();
+      
+      // Setup API auth error handler
+      api.onAuthError((status, error) => {
+        console.warn('Authentication error:', status, error);
+        if (status === 401) {
+          // Token expired or invalid - logout
+          logout();
+          alert('Your session has expired. Please log in again.');
+        } else if (status === 403) {
+          alert('You do not have permission to perform this action. Please log in.');
+        }
+      });
+      
       // Load initial stats
       loadStats();
       
@@ -351,6 +376,7 @@ export default {
       manageLibraryRef,
       showManageLibrary,
       stats,
+      isAuthenticated,
       hasNext,
       hasPrevious,
       onPlayTrack,

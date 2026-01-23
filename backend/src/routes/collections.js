@@ -8,6 +8,7 @@ import { getDb } from '../db/database.js';
 import * as collectionQueries from '../db/collectionQueries.js';
 import { getIO } from '../websocket/socketServer.js';
 import logger from '../utils/logger.js';
+import { authRequired } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -113,7 +114,7 @@ export default () => {
    * POST /api/collections
    * Create a new collection
    */
-  router.post('/', (req, res) => {
+  router.post('/', authRequired(), (req, res) => {
     try {
       const db = getDb();
       const { name, type, parent_id, sort_order, is_ordered } = req.body;
@@ -145,7 +146,7 @@ export default () => {
    * PUT /api/collections/:id
    * Update a collection
    */
-  router.put('/:id', (req, res) => {
+  router.put('/:id', authRequired(), (req, res) => {
     try {
       const db = getDb();
       const { name, parent_id, sort_order, is_ordered } = req.body;
@@ -172,7 +173,7 @@ export default () => {
    * DELETE /api/collections/:id
    * Delete a collection
    */
-  router.delete('/:id', (req, res) => {
+  router.delete('/:id', authRequired(), (req, res) => {
     try {
       const db = getDb();
       collectionQueries.deleteCollection(db, req.params.id);
@@ -191,7 +192,7 @@ export default () => {
    * POST /api/collections/:id/tracks
    * Add a track to a collection
    */
-  router.post('/:id/tracks', (req, res) => {
+  router.post('/:id/tracks', authRequired(), (req, res) => {
     try {
       const db = getDb();
       logger.info({ collectionId: req.params.id, body: req.body }, '📌 POST /tracks request received');
@@ -224,7 +225,7 @@ export default () => {
    * Remove a track from a collection
    * Optional query param: position (to remove specific instance when duplicates exist)
    */
-  router.delete('/:id/tracks/:trackId', (req, res) => {
+  router.delete('/:id/tracks/:trackId', authRequired(), (req, res) => {
     try {
       const db = getDb();
       const position = req.query.position !== undefined ? parseInt(req.query.position, 10) : null;
@@ -250,7 +251,7 @@ export default () => {
    * PUT /api/collections/:id/tracks/:trackId/position
    * Reorder a track within a collection
    */
-  router.put('/:id/tracks/:trackId/position', (req, res) => {
+  router.put('/:id/tracks/:trackId/position', authRequired(), (req, res) => {
     try {
       const db = getDb();
       const { position } = req.body;
@@ -280,7 +281,7 @@ export default () => {
    * DELETE /api/collections/:id/tracks
    * Clear all tracks from a collection
    */
-  router.delete('/:id/tracks', (req, res) => {
+  router.delete('/:id/tracks', authRequired(), (req, res) => {
     try {
       const db = getDb();
       const collection = collectionQueries.clearTracks(db, req.params.id);

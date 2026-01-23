@@ -6,6 +6,8 @@ import { createServer } from 'http';
 import config from './config/config.js';
 import logger from './utils/logger.js';
 import { initDatabase, closeDatabase } from './db/database.js';
+import { authOptional } from './middleware/auth.js';
+import authRoutes from './routes/auth.js';
 import systemRoutes from './routes/system.js';
 import trackRoutes from './routes/tracks.js';
 import audioRoutes from './routes/audio.js';
@@ -59,7 +61,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Authentication middleware (optional - attaches user if token present)
+app.use(authOptional());
+
 // API Routes (must be before static files)
+app.use('/api/auth', authRoutes);
 app.use('/api', systemRoutes);
 app.use('/api/tracks', trackRoutes);
 app.use('/api/folders', folderRoutes);

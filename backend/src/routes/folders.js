@@ -2,6 +2,7 @@ import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { folderQueries, trackFolderQueries, trackQueries } from '../db/database.js';
 import logger from '../utils/logger.js';
+import { authRequired } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -103,7 +104,7 @@ router.get('/:id', (req, res) => {
  * POST /api/folders
  * Create new folder
  */
-router.post('/', (req, res) => {
+router.post('/', authRequired(), (req, res) => {
   try {
     const { name, parent_id, sort_order } = req.body;
     
@@ -142,7 +143,7 @@ router.post('/', (req, res) => {
  * PUT /api/folders/:id
  * Update folder
  */
-router.put('/:id', (req, res) => {
+router.put('/:id', authRequired(), (req, res) => {
   try {
     const folder = folderQueries.getById(req.params.id);
     
@@ -200,7 +201,7 @@ router.put('/:id', (req, res) => {
  * DELETE /api/folders/:id
  * Delete folder
  */
-router.delete('/:id', (req, res) => {
+router.delete('/:id', authRequired(), (req, res) => {
   try {
     const folder = folderQueries.getById(req.params.id);
     
@@ -235,7 +236,7 @@ router.delete('/:id', (req, res) => {
  * POST /api/folders/:id/tracks/:trackId
  * Add track to folder
  */
-router.post('/:id/tracks/:trackId', (req, res) => {
+router.post('/:id/tracks/:trackId', authRequired(), (req, res) => {
   try {
     const folder = folderQueries.getById(req.params.id);
     if (!folder) {
@@ -271,7 +272,7 @@ router.post('/:id/tracks/:trackId', (req, res) => {
  * DELETE /api/folders/:id/tracks/:trackId
  * Remove track from folder
  */
-router.delete('/:id/tracks/:trackId', (req, res) => {
+router.delete('/:id/tracks/:trackId', authRequired(), (req, res) => {
   try {
     const existing = trackFolderQueries.getByTrackAndFolder(req.params.trackId, req.params.id);
     if (!existing) {
