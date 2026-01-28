@@ -1,5 +1,5 @@
 {
-  "name": "rpg-music-backend",
+  "name": "muzsikapp-backend",
   "version": "1.0.0",
   "description": "Self-hosted synchronized music streaming for RPG gaming sessions",
   "main": "src/server.js",
