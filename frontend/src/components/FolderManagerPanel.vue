@@ -54,17 +54,34 @@
 
         <div class="form-group">
           <label>Parent Folder (optional)</label>
-          <select v-model="parentFolderId">
-            <option :value="null">-- Root Level --</option>
-            <option
-              v-for="folder in folders"
-              :key="folder.id"
-              :value="folder.id"
-              :disabled="showEditDialog && folder.id === editingFolder?.id"
+          <div class="parent-folder-selector">
+            <div 
+              class="folder-option root-option"
+              :class="{ selected: parentFolderId === null }"
+              @click="selectParentFolder(null)"
             >
-              {{ folder.name }}
-            </option>
-          </select>
+              <span class="folder-icon">📁</span>
+              <span class="folder-name">Root Level</span>
+            </div>
+            
+            <div class="folder-tree-list">
+              <div
+                v-for="folder in flatFoldersForSelection"
+                :key="folder.id"
+                class="folder-option"
+                :class="{ 
+                  selected: parentFolderId === folder.id,
+                  disabled: folder.disabled
+                }"
+                :style="{ paddingLeft: `${folder.depth * 20 + 12}px` }"
+                @click="!folder.disabled && selectParentFolder(folder.id)"
+              >
+                <span class="folder-prefix">{{ folder.prefix }}</span>
+                <span class="folder-icon">📁</span>
+                <span class="folder-name">{{ folder.name }}</span>
+              </div>
+            </div>
+          </div>
         </div>
         
         <div class="dialog-actions">
@@ -183,6 +200,84 @@ const handleNewFolderClick = () => {
 const rootFolders = computed(() => {
   return folders.value.filter(f => !f.parent_id);
 });
+
+/**
+ * Get all descendant folder IDs for a given folder (recursive)
+ */
+const getDescendantIds = (folderId) => {
+  const descendants = [];
+  const children = folders.value.filter(f => f.parent_id === folderId);
+  
+  for (const child of children) {
+    descendants.push(child.id);
+    descendants.push(...getDescendantIds(child.id));
+  }
+  
+  return descendants;
+};
+
+/**
+ * Get folder IDs that should be disabled when editing
+ * (the folder itself and all its descendants to prevent circular references)
+ */
+const disabledFolderIdsForEdit = computed(() => {
+  if (!showEditDialog.value || !editingFolder.value) {
+    return [];
+  }
+  
+  return [
+    editingFolder.value.id,
+    ...getDescendantIds(editingFolder.value.id)
+  ];
+});
+
+/**
+ * Flatten folder hierarchy for parent selection display
+ */
+const flatFoldersForSelection = computed(() => {
+  const flattened = [];
+  const disabledIds = disabledFolderIdsForEdit.value;
+  
+  const flattenFolder = (folder, depth = 0, parentPrefix = '') => {
+    const prefix = depth > 0 ? parentPrefix + '└─ ' : '';
+    
+    flattened.push({
+      id: folder.id,
+      name: folder.name,
+      depth,
+      prefix,
+      disabled: disabledIds.includes(folder.id)
+    });
+    
+    // Find and sort children
+    const children = folders.value
+      .filter(f => f.parent_id === folder.id)
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+    
+    // Recursively add children
+    children.forEach((child, index) => {
+      const isLast = index === children.length - 1;
+      const childPrefix = depth > 0 ? parentPrefix + (isLast ? '   ' : '│  ') : '';
+      flattenFolder(child, depth + 1, childPrefix);
+    });
+  };
+  
+  // Get root folders (no parent)
+  const rootFolders = folders.value
+    .filter(f => !f.parent_id)
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+  
+  rootFolders.forEach(folder => flattenFolder(folder));
+  
+  return flattened;
+});
+
+/**
+ * Select a parent folder
+ */
+const selectParentFolder = (folderId) => {
+  parentFolderId.value = folderId;
+};
 
 /**
  * Get track count for a folder
@@ -614,8 +709,7 @@ defineExpose({
   font-size: 0.9em;
 }
 
-.form-group input,
-.form-group select {
+.form-group input {
   width: 100%;
   padding: 10px;
   background: #1a1a1a;
@@ -625,10 +719,70 @@ defineExpose({
   font-size: 1em;
 }
 
-.form-group input:focus,
-.form-group select:focus {
+.form-group input:focus {
   outline: none;
   border-color: #4CAF50;
+}
+
+.parent-folder-selector {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.folder-tree-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.folder-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+  user-select: none;
+}
+
+.folder-option:hover:not(.disabled) {
+  background: #2a2a2a;
+}
+
+.folder-option.selected {
+  background: #2a4a2a;
+  border-left: 3px solid #4CAF50;
+}
+
+.folder-option.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.folder-option.root-option {
+  border-bottom: 1px solid #444;
+  font-weight: 500;
+}
+
+.folder-prefix {
+  color: #666;
+  font-family: monospace;
+  flex-shrink: 0;
+}
+
+.folder-icon {
+  flex-shrink: 0;
+  font-size: 0.9em;
+}
+
+.folder-name {
+  color: #e0e0e0;
+  font-size: 0.95em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dialog input {

@@ -14,6 +14,7 @@
         :key="folder.id"
         :value="folder.id"
         :style="{ paddingLeft: `${folder.depth * 16 + 8}px` }"
+        :disabled="disabledFolderIds.includes(folder.id)"
       >
         {{ folder.prefix }}{{ folder.name }}{{ folder.trackCount !== undefined ? ` (${folder.trackCount})` : '' }}
       </option>
@@ -51,6 +52,10 @@ const props = defineProps({
   multiple: {
     type: Boolean,
     default: false
+  },
+  disabledFolderIds: {
+    type: Array,
+    default: () => []
   }
 });
 
@@ -150,6 +155,11 @@ const handleChange = () => {
 
 .folder-select option:hover {
   background: #2a2a2a;
+}
+
+.folder-select option:disabled {
+  color: #666;
+  cursor: not-allowed;
 }
 
 .folder-select[multiple] {
