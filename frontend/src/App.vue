@@ -1,7 +1,10 @@
 <template>
   <div id="app-content">
     <header class="app-header">
-      <h1>🎵 MuzsikApp</h1>
+      <div class="header-title">
+        <img src="/musicappiconblackpaper.png" alt="MuzsikApp" class="header-icon" />
+        <h1>MuzsikApp</h1>
+      </div>
       <div class="header-actions">
         <div class="room-selector">
           <button
@@ -562,6 +565,21 @@ body {
   flex-shrink: 0;
   height: var(--layout-header-height);
   gap: var(--spacing-xl);
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.header-icon {
+  height: 32px;
+  width: 32px;
+  object-fit: contain;
+  flex-shrink: 0;
 }
 
 .app-header h1 {
