@@ -112,11 +112,11 @@
         type="range"
         min="0"
         max="100"
-        :value="volume * 100"
+        :value="volumeToSlider(volume)"
         @input="onVolumeChange"
         class="volume-slider"
       />
-      <span class="volume-value">{{ Math.round(volume * 100) }}%</span>
+      <span class="volume-value">{{ (volume * 100).toFixed(1) }}%</span>
     </div>
 
     
@@ -459,9 +459,26 @@ export default {
       }
     };
 
+    // Piecewise volume conversion: slider 0-50 → volume 0-10%, slider 50-100 → volume 10-100%
+    const sliderToVolume = (sliderValue) => {
+      if (sliderValue <= 50) {
+        return (sliderValue / 50) * 0.1;
+      } else {
+        return 0.1 + ((sliderValue - 50) / 50) * 0.9;
+      }
+    };
+
+    const volumeToSlider = (vol) => {
+      if (vol <= 0.1) {
+        return (vol / 0.1) * 50;
+      } else {
+        return 50 + ((vol - 0.1) / 0.9) * 50;
+      }
+    };
+
     // Volume change
     const onVolumeChange = (event) => {
-      const newVolume = parseFloat(event.target.value) / 100;
+      const newVolume = sliderToVolume(parseFloat(event.target.value));
       volume.value = newVolume;
       if (audioElement.value) {
         audioElement.value.volume = newVolume;
@@ -471,6 +488,7 @@ export default {
       localStorage.setItem('rpg-music-volume', newVolume.toString());
       console.log('Volume saved to localStorage:', newVolume);
     };
+
 
     // WebSocket event handlers
     const handleStateSync = (data) => {
@@ -770,6 +788,7 @@ export default {
       onError,
       seekToPosition,
       onVolumeChange,
+      volumeToSlider,
     };
   },
 };
