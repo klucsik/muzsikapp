@@ -54,12 +54,14 @@
                :style="{ left: loopStartPercent + '%' }"
                @mousedown="startDragLoopStart"
                title="Loop start - drag to adjust">
+            <div class="loop-marker-label">{{ loopStart !== null ? formatTime(loopStart) : '0:00' }}</div>
             <div class="loop-marker-handle">⟨</div>
           </div>
           <div class="loop-marker loop-end" 
                :style="{ left: loopEndPercent + '%' }"
                @mousedown="startDragLoopEnd"
                title="Loop end - drag to adjust">
+            <div class="loop-marker-label">{{ loopEnd !== null ? formatTime(loopEnd) : formatTime(duration) }}</div>
             <div class="loop-marker-handle">⟩</div>
           </div>
         </template>
@@ -976,6 +978,22 @@ audio {
   font-weight: bold;
   pointer-events: none;
   line-height: 1;
+}
+
+.loop-marker-label {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(71, 71, 71, 0.75);
+  color: #999;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 2px 5px;
+  border-radius: 4px;
+  pointer-events: none;
+  line-height: 1.4;
 }
 
 .time-display {
