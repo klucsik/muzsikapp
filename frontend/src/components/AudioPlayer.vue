@@ -705,10 +705,23 @@ export default {
       clientId.value = null;
     };
 
+    // Keyboard media key handler
+    const handleMediaKey = (event) => {
+      if (event.key === 'MediaTrackNext') {
+        event.preventDefault();
+        if (props.hasNext) handleNextClick();
+      } else if (event.key === 'MediaTrackPrevious') {
+        event.preventDefault();
+        if (props.hasPrevious) handlePreviousClick();
+      }
+    };
+
     // Lifecycle
     onMounted(() => {
       // Connect to WebSocket
       websocket.connect();
+      
+      window.addEventListener('keydown', handleMediaKey);
       
       // Get initial room ID
       const initialRoomId = websocket.getCurrentRoomId();
@@ -737,6 +750,7 @@ export default {
     });
 
     onUnmounted(() => {
+      window.removeEventListener('keydown', handleMediaKey);
       // Clean up event listeners
       websocket.off('connected', handleConnected);
       websocket.off('disconnected', handleDisconnected);
