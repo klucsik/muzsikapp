@@ -81,7 +81,7 @@ const publicPath = path.join(__dirname, '../public');
 app.use(express.static(publicPath));
 
 // Serve index.html for all non-API routes (SPA fallback)
-app.get('*', (req, res, next) => {
+app.get('/{*path}', (req, res, next) => {
   // Skip if it's an API route or socket.io
   if (req.url.startsWith('/api') || req.url.startsWith('/audio') || req.url.startsWith('/socket.io')) {
     return next();
@@ -113,7 +113,7 @@ app.get('*', (req, res, next) => {
 });
 
 // 404 handler for API routes
-app.use('/api/*', (req, res) => {
+app.use('/api/{*path}', (req, res) => {
   res.status(404).json({
     error: 'Not Found',
     path: req.url,

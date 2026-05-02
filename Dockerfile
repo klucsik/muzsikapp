@@ -1,6 +1,6 @@
 # Multi-stage Dockerfile for RPG Music Streaming Server
 # Stage 1: Build frontend
-FROM node:22-alpine AS frontend-builder
+FROM node:24-alpine AS frontend-builder
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ WORKDIR /app/frontend
 RUN npm ci && npm run build
 
 # Stage 2: Build backend and final image
-FROM node:22-alpine AS production
+FROM node:24-alpine AS production
 
 WORKDIR /app
 
