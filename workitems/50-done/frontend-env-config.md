@@ -1,11 +1,11 @@
 ---
 id: frontend-env-config
 title: Configure frontend .env for local development
-status: 20-doing
+status: 50-done
 priority: high
 created: 2026-06-07
-updated: 2026-06-08
-completed:
+updated: 2026-06-16
+completed: 2026-06-16
 target_release: next
 estimate: S
 risk: low
@@ -86,6 +86,9 @@ But it's missing/needs:
 
 ### 2026-06-07
 - Created in inbox as part of dev environment setup workitems
+
+### 2026-06-16
+- Implemented Path A: set `VITE_API_URL=` and `VITE_WS_URL=` in `frontend/.env`. Verified `vite.config.js` has correct proxy configuration.
 
 ## Notes
 

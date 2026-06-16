@@ -8,7 +8,9 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "db:migrate": "node src/db/migrate.js",
-    "scan": "node src/scanner/scan.js"
+    "scan": "node src/scanner/scan.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "music",

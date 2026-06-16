@@ -233,7 +233,7 @@ export async function downloadAudio(videoIdOrUrl, outputDir, onProgress = null) 
     
     const args = [
       '--extract-audio',
-      '--audio-format', 'mp3',
+      '--audio-format', 'm4a',
       '--audio-quality', '0', // Best quality
       '--add-metadata',
       '--embed-thumbnail',
@@ -271,7 +271,7 @@ export async function downloadAudio(videoIdOrUrl, outputDir, onProgress = null) 
         onProgress(percent, etaSeconds);
       }
       
-      // Parse destination line: [download] Destination: /path/to/file.mp3
+      // Parse destination line: [download] Destination: /path/to/file.m4a
       const destMatch = output.match(/\[download\] Destination: (.+)/);
       if (destMatch) {
         downloadedFile = destMatch[1].trim();
@@ -299,13 +299,13 @@ export async function downloadAudio(videoIdOrUrl, outputDir, onProgress = null) 
       // If we didn't detect the file from stdout, try to find it
       if (!downloadedFile) {
         try {
-          // The file should match the pattern yt-*-timestamp.mp3
+          // The file should match the pattern yt-*-timestamp.m4a
           const { readdir } = await import('fs/promises');
           const files = await readdir(outputDir);
           const matchingFile = files.find(f => 
             f.startsWith('yt-') && 
             f.includes(`-${timestamp}`) && 
-            f.endsWith('.mp3')
+            f.endsWith('.m4a')
           );
           
           if (matchingFile) {
