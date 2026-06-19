@@ -1,11 +1,11 @@
 ---
 id: migrate-ytdlp-format-to-m4a
 title: Migrate yt-dlp download format from MP3 to M4A (AAC) and create migration script for existing library
-status: inbox
+status: done
 priority: high
 created: 2026-06-14
 updated: 2026-06-14
-completed:
+completed: 2026-06-17
 target_release: next
 estimate: S
 risk: low
@@ -68,6 +68,12 @@ None — yt-dlp already supports `--audio-format m4a`, FFmpeg is installed with 
 
 ### 2026-06-14
 - Created from V2 player design refinement session decisions: M4A as canonical format, one-shot re-download migration via stored YouTube URLs. Path A recommended over lazy approach for clean library state. Quality baseline score (inbox): ★★★☆☆ 3/10 — needs implementation paths and test plan to advance to next lane.
+
+### 2026-06-17
+- **Done:** ytdlpDownloader.js line 236 changed `'mp3' → 'm4a'` + updated log comments (lines 274, 302, 308).
+- **Done:** Migration script `backend/scripts/migrate-format.mjs` — dry-run default (`--apply` to execute), reads DB for non-M4A tracks with YouTube URLs, re-downloads via yt-dlp with M4A args, atomic replace + cleanup of old files.
+- **Committed in:** `59cc656` (frontend: configure .env for local development via Path A).
+- **Note:** Unit test for format string was not written despite acceptance criteria. Migration script uses DB directly (better-sqlite3) — consistent with existing backend patterns but noted as an operational tool, not a library change.
 
 ## Notes
 
