@@ -18,6 +18,18 @@
             <span class="client-count" v-if="room.clientCount > 0">{{ room.clientCount }}</span>
           </button>
         </div>
+
+        <div class="player-mode-toggle">
+          <button
+            :class="['mode-btn', { active: playerMode === 'v1' }]"
+            @click="setPlayerMode('v1')"
+          >V1</button>
+          <button
+            :class="['mode-btn', { active: playerMode === 'v2' }]"
+            @click="setPlayerMode('v2')"
+          >V2</button>
+        </div>
+
         <div class="stats">
           <span class="stat">{{ stats.tracks }} tracks</span>
           <span class="stat">{{ stats.clients }} clients</span>
@@ -32,6 +44,15 @@
         <!-- Left: Audio Player -->
         <div class="player-column">
           <AudioPlayer 
+            v-if="playerMode === 'v1'"
+            :current-track-id="currentTrackId"
+            :has-next="hasNext"
+            :has-previous="hasPrevious"
+            @next-track="playNextTrack"
+            @previous-track="playPreviousTrack"
+          />
+          <AudioPlayerV2 
+            v-else
             :current-track-id="currentTrackId"
             :has-next="hasNext"
             :has-previous="hasPrevious"
@@ -96,6 +117,7 @@
 <script>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import AudioPlayer from './components/AudioPlayer.vue';
+import AudioPlayerV2 from './components/AudioPlayerV2.vue';
 import MusicLibraryPanel from './components/MusicLibraryPanel.vue';
 import FolderManagerPanel from './components/FolderManagerPanel.vue';
 import PlaylistPanel from './components/PlaylistPanel.vue';
@@ -111,6 +133,7 @@ export default {
   name: 'App',
   components: {
     AudioPlayer,
+    AudioPlayerV2,
     MusicLibraryPanel,
     FolderManagerPanel,
     PlaylistPanel,
@@ -123,6 +146,12 @@ export default {
     const { initialize: initializeAuth, isAuthenticated, logout } = useAuth();
     const toast = useToast();
     
+    const playerMode = ref(localStorage.getItem('muzsikapp-player-mode') || 'v1');
+    const setPlayerMode = (mode) => {
+      playerMode.value = mode;
+      localStorage.setItem('muzsikapp-player-mode', mode);
+    };
+
     const currentTrackId = ref(null);
     const currentTrack = ref(null);
     // Load saved room from localStorage or default to 'room-1'
@@ -408,6 +437,8 @@ export default {
     });
 
     return {
+      playerMode,
+      setPlayerMode,
       currentTrackId,
       currentTrack,
       currentRoomId,
@@ -920,5 +951,42 @@ body {
     flex-shrink: 0;
     width: 100%;
   }
+
+  .player-mode-toggle {
+    order: -1;
+    margin-bottom: var(--spacing-md);
+  }
+}
+
+/* =====================================================
+   PLAYER MODE TOGGLE
+   ===================================================== */
+.player-mode-toggle {
+  display: flex;
+  background: #1a1a1a;
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+
+.mode-btn {
+  padding: var(--spacing-xs) var(--spacing-md);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: #999;
+  font-size: 0.85em;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-btn:hover {
+  color: #fff;
+}
+
+.mode-btn.active {
+  background: var(--color-primary);
+  color: white;
 }
 </style>
