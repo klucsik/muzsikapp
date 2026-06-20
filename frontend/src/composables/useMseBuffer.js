@@ -1,95 +1,50 @@
 /**
- * useMseBuffer — MediaSource Extensions (MSE) audio buffer manager.
- *
- * Fetches 30-second M4A/AAC chunks via HTTP Range requests and feeds them
- * into an MSE SourceBuffer for continuous playback. Exposes reactive state
- * for integration with AudioPlayerV2.vue controls.
- *
- * Key responsibilities:
- * - Create and configure MediaSource + audio element pipeline
- * - Fetch 30s M4A segments via Range requests from /audio/:trackId
- * - Decode AAC natively through MSE SourceBuffer (no JS codec layer)
- * - Feed decoded buffers at correct media timeline positions
- * - Handle end-of-stream on track completion, reset on track switch
+ * useMseBuffer — MediaSource Extensions (MSE) audio buffer manager with caching and prefetching.
+ * 
+ * Fetches 30s M4A/AAC chunks via HTTP Range requests, manages an in-memory cache,
+ * and uses prediction logic to prefetch upcoming segments for seamless playback.
  */
 
 import { ref, computed } from 'vue';
+import { ChunkCache, predictNextChunks, CHUNK_DURATION } from '../services/chunkCache.js';
+import { telemetry } from '../composables/useTelemetry.js';
 
 // ─── Constants ───────────────────────────────────────────────────────
 
-const CHUNK_DURATION = 30; // seconds per chunk (matches V2 design spec)
 const AAC_MIME_TYPE = 'audio/mp4; codecs="mp4a.40.2"';
-const INIT_RETRY_DELAY = 150; // ms between chunk-fetch retries on SourceBuffer.update
+const INIT_RETRY_DELAY = 150;
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-/**
- * Check whether the browser supports MSE with AAC in MP4 container.
- * @returns {boolean}
- */
 function isMseAacSupported() {
   return typeof MediaSource !== 'undefined' &&
     MediaSource.isTypeSupported(AAC_MIME_TYPE);
 }
 
-/**
- * Calculate approximate byte boundaries for a chunk index within a file of known size.
- * Uses uniform time-to-byte mapping: each chunk covers a proportional slice of the file.
- * This is an approximation — actual AAC frames may not align perfectly with byte boundaries,
- * but MSE's decoder is tolerant of minor misalignment at chunk edges.
- *
- * @param {number} chunkIndex - Zero-based index of the chunk to fetch
- * @param {number} totalChunks - Total number of chunks in the file
- * @param {number} fileSize - Total size of the file in bytes
- * @returns {{ start: number, end: number }} Byte range (inclusive)
- */
 function calculateChunkByteRange(chunkIndex, totalChunks, fileSize) {
   const bytesPerChunk = Math.floor(fileSize / totalChunks);
   const start = chunkIndex * bytesPerChunk;
   const end = chunkIndex === totalChunks - 1
-    ? fileSize - 1 // last chunk gets everything remaining (handles rounding)
+    ? fileSize - 1
     : start + bytesPerChunk - 1;
   return { start, end: Math.min(end, fileSize - 1) };
 }
 
-/**
- * Fetch a byte-range slice of the audio file and return as ArrayBuffer.
- *
- * @param {string} baseUrl - Base URL for the audio endpoint (e.g. "/audio/:trackId")
- * @param {number} startByte - Start byte offset (inclusive)
- * @param {number} endByte - End byte offset (inclusive)
- * @returns {Promise<ArrayBuffer>}
- * @throws {Error} On non-206 response or fetch failure
- */
 async function fetchChunk(baseUrl, startByte, endByte) {
   const response = await fetch(baseUrl, {
-    headers: {
-      'Range': `bytes=${startByte}-${endByte}`,
-    },
+    headers: { 'Range': `bytes=${startByte}-${endByte}` },
   });
-
-  if (response.status === 416) {
-    throw new Error(`Range not satisfiable (${startByte}-${endByte}). Server may have smaller file.`);
-  }
-  if (!response.ok || response.status !== 206) {
-    throw new Error(`Chunk fetch failed: HTTP ${response.status} ${response.statusText}`);
-  }
-
+  if (response.status === 416) throw new Error('Range not satisfiable');
+  if (!response.ok || response.status !== 206) throw new Error(`Fetch failed: ${response.status}`);
   return response.arrayBuffer();
 }
 
 // ─── Composable ──────────────────────────────────────────────────────
 
-/**
- * Create an MSE-based audio buffer manager.
- *
- * Returns reactive state and imperative control methods for driving
- * AudioPlayerV2.vue playback from chunked M4A/AAC segments.
- *
- * @returns {object} Reactive state + control API
- */
 export function useMseBuffer() {
-  // ── Internal refs (not exposed directly) ────────────────────────
+  const cache = new ChunkCache(50 * 1024 * 1024); // 50MB default budget
+
+  // ── Internal State ─────────────────────────────────────────────
 
   /** @type {{ value: HTMLAudioElement | null }} */
   const audioEl = ref(null);
@@ -98,455 +53,279 @@ export function useMseBuffer() {
   /** @type {{ value: SourceBuffer | null }} */
   const sourceBuffer = ref(null);
 
-  // Track metadata for chunk calculations
   const currentTrackId = ref(null);
-  const trackDuration = ref(0);       // seconds (from server metadata)
-  const fileSize = ref(0);            // bytes (from HEAD request or Content-Range header)
-  const totalChunks = computed(() => {
-    if (trackDuration.value <= 0) return 0;
-    return Math.ceil(trackDuration.value / CHUNK_DURATION);
-  });
+  const trackDuration = ref(0);
+  const fileSize = ref(0);
+  const playlist = ref([]); 
+  const loopRegion = ref(null); // { startSec, endSec }
+  const repeatMode = ref('none');
 
-  // ── Reactive state (exposed to consumer) ────────────────────────
-
-  /** Whether playback is currently running */
   const playing = ref(false);
-
-  /** Time ranges that are buffered in the MSE SourceBuffer (in seconds) */
-  const bufferedRanges = ref(/** @type {TimeRanges} */ (null));
-
-  /** Current error state, or null if no error */
+  const bufferedRanges = ref(null);
   const error = ref(null);
-
-  /** Whether MSE with AAC is supported by this browser */
   const mseSupported = ref(isMseAacSupported());
+  const loadProgress = ref(0); 
 
-  /** Progress: fraction of total chunks that have been fetched and appended (0..1) */
-  const loadProgress = ref(0);
+  let _fetchedChunksCount = 0;
+  let _abortController = null;
+  let _isShuttingDown = false;
+  let _prefetchInterval = null;
+  let _audioBaseUrl = '';
+  let _stallDetectionInterval = null;
 
-  // ── Private state for chunk pipeline ────────────────────────────
+  // ── Core Lifecycle ─────────────────────────────────────────────
 
-  let _fetchedChunks = new Set();     // indices already appended to SourceBuffer
-  let _abortController = null;        // AbortController for cancelling track fetches
-  let _isShuttingDown = false;        // flag to prevent re-entry during cleanup
-  let _audioBaseUrl = '';             // base URL for chunk Range requests (set on loadTrack)
-
-  // ── Core lifecycle methods ──────────────────────────────────────
-
-  /**
-   * Initialize the MSE pipeline: create MediaSource, attach to audio element,
-   * configure AAC SourceBuffer. Must be called before any chunk operations.
-   *
-   * @param {HTMLAudioElement} el - The <audio> DOM element to control
-   */
   function initMediaSource(el) {
     if (_isShuttingDown) return;
-
-    // Clean up any previous MediaSource
     shutdown();
-
     const ms = new MediaSource();
     mediaSource.value = ms;
-
     el.src = URL.createObjectURL(ms);
 
     ms.addEventListener('sourceopen', async () => {
       try {
-        if (!ms.activeSourceBuffers) {
-          // Safety: remove old source buffers (shouldn't exist on fresh MS, but guard anyway)
-          while (ms.sourceBuffer.length > 0) {
-            ms.removeSourceBuffer(ms.sourceBuffer[0]);
-          }
-        }
-
         const sb = ms.addSourceBuffer(AAC_MIME_TYPE);
         sourceBuffer.value = sb;
-
-        // When SourceBuffer finishes updating, trigger next chunk fetch if needed
         sb.addEventListener('updateend', () => {
           if (!_isShuttingDown && currentTrackId.value) {
             updateBufferedRanges();
             _onSourceBufferUpdateEnd();
           }
         });
-
-        sb.addEventListener('error', (e) => {
-          console.error('[MSE] SourceBuffer error:', e);
-          error.value = new Error('SourceBuffer encoding error — AAC decode failed');
-        });
       } catch (err) {
-        console.error('[MSE] Failed to add SourceBuffer:', err);
         error.value = err;
       }
     });
 
-    ms.addEventListener('error', () => {
-      if (!ms.readyState || ms.readyState === 'closed') return; // ignore post-shutdown
-      console.error('[MSE] MediaSource error, state:', ms.readyState);
-      error.value = new Error(`MediaSource error (state: ${ms.readyState})`);
-    });
-
-    audioEl.value = el;
+    startStallDetection();
   }
 
-  /**
-   * Tear down the MSE pipeline and release all resources.
-   * Called on track switch or component unmount.
-   */
-  function shutdown() {
-    _isShuttingDown = true;
+  function startStallDetection() {
+    if (_stallDetectionInterval) clearInterval(_stallDetectionInterval);
+    _stallDetectionInterval = setInterval(() => {
+      const el = audioEl.value;
+      if (playing.value && el) {
+        const buffered = el.buffered;
+        if (buffered.length > 0) {
+          const lastBufferedEnd = buffered.end(buffered.length - 1);
+          if (el.currentTime >= lastBufferedEnd - 0.5 && el.currentTime < el.duration - 0.1) {
+             telemetry.recordStallStart();
+          } else if (el.currentTime < lastBufferedEnd - 0.2) {
+             telemetry.recordStallEnd();
+          }
+        }
+      }
+    }, 1000);
+  }
 
-    // Cancel any in-flight fetches
-    if (_abortController) {
-      _abortController.abort();
-      _abortController = null;
-    }
+  function shutdown() {
+    if (_stallDetectionInterval) clearInterval(_stallDetectionInterval);
+    if (_isShuttingDown) return;
+    _isShuttingDown = true;
+    
+    if (_prefetchInterval) clearInterval(_prefetchInterval);
+    if (_abortController) _abortController.abort();
 
     sourceBuffer.value = null;
-
-    // End stream and close MediaSource
     if (mediaSource.value && mediaSource.value.readyState === 'open') {
-      try {
-        mediaSource.value.endOfStream();
-      } catch (_) { /* ignore — may throw if already ending */ }
+      try { mediaSource.value.endOfStream(); } catch (_) {}
     }
-
-    // Detach audio element from object URL
-    if (audioEl.value) {
-      const src = audioEl.value.src;
-      if (src && src.startsWith('blob:')) {
-        URL.revokeObjectURL(src);
-        audioEl.value.removeAttribute('src');
-        audioEl.value.load();
-      }
-      audioEl.value = null;
+    if (audioEl.value && audioEl.value.src.startsWith('blob:')) {
+      URL.revokeObjectURL(audioEl.value.src);
+      audioEl.value.removeAttribute('src');
+      audioEl.value.load();
     }
 
     mediaSource.value = null;
-    _fetchedChunks.clear();
     currentTrackId.value = null;
     trackDuration.value = 0;
     fileSize.value = 0;
-    loadProgress.value = 0;
+    playlist.value = [];
+    loopRegion.value = null;
+    repeatMode.value = 'none';
     playing.value = false;
     error.value = null;
     bufferedRanges.value = null;
     _isShuttingDown = false;
   }
 
-  /**
-   * Load a track: discover file size, initialize MSE pipeline, start chunk fetching.
-   *
-   * @param {string} trackId - The unique track identifier (database ID)
-   * @param {string} audioBaseUrl - Full URL to the audio endpoint for this track (e.g. "/audio/abc123")
-   * @param {HTMLAudioElement} audioElRef - The <audio> element reference
-   * @param {number} [duration] - Optional known duration in seconds; if omitted, fetched via HEAD
-   */
   async function loadTrack(trackId, audioBaseUrl, audioElRef, duration) {
-    // Shut down previous track first
     shutdown();
-
     currentTrackId.value = trackId;
+    _audioBaseUrl = audioBaseUrl;
     error.value = null;
-    playing.value = false;
 
-    if (!mseSupported.value) {
-      error.value = new Error('MSE with AAC is not supported in this browser');
-      return;
-    }
-
-    // Initialize the MSE pipeline on the audio element
     initMediaSource(audioElRef);
-
-    // Wait for MediaSource to open and SourceBuffer to be ready
     await waitForSourceOpen();
 
-    if (!sourceBuffer.value || error.value) {
-      return; // error already set in event listener
-    }
+    if (!sourceBuffer.value || error.value) return;
 
-    // Discover file size via HEAD request (also validates the endpoint exists)
-    let discoveredFileSize = 0;
     try {
       const headResp = await fetch(audioBaseUrl, { method: 'HEAD' });
-      if (!headResp.ok) {
-        throw new Error(`HEAD ${audioBaseUrl} returned ${headResp.status}`);
-      }
-      const contentLength = headResp.headers.get('Content-Length');
-      discoveredFileSize = contentLength ? parseInt(contentLength, 10) : 0;
+      fileSize.value = parseInt(headResp.headers.get('Content-Length') || '0', 10);
+      trackDuration.value = duration || parseFloat(headResp.headers.get('X-Track-Duration')) || 0;
 
-      // Also try to extract duration from metadata header if server provides it
-      const metaDuration = headResp.headers.get('X-Track-Duration');
-      if (metaDuration && !duration) {
-        duration = parseFloat(metaDuration);
-      }
+      _startPrefetching();
+      await _fetchNextChunkInSequence(0);
     } catch (err) {
-      console.warn('[MSE] HEAD request failed, will discover size from first chunk:', err.message);
+      error.value = err;
     }
-
-    fileSize.value = discoveredFileSize;
-    trackDuration.value = duration || 0;
-    _audioBaseUrl = audioBaseUrl;
-
-    // Start fetching chunks sequentially
-    _startFetching(audioBaseUrl);
   }
 
-  /**
-   * Wait for the MediaSource to reach 'open' state.
-   * @returns {Promise<void>}
-   */
   function waitForSourceOpen() {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('MediaSource sourceopen timed out (5s)'));
-      }, 5000);
-
       const onOpen = () => {
-        clearTimeout(timeout);
-        if (mediaSource.value) {
+        if (mediaSource.value?.readyState === 'open') {
           mediaSource.value.removeEventListener('sourceopen', onOpen);
+          resolve();
         }
-        resolve();
       };
-
-      if (mediaSource.value && mediaSource.value.readyState === 'open') {
-        clearTimeout(timeout);
-        resolve();
-        return;
-      }
-
-      if (mediaSource.value) {
-        mediaSource.value.addEventListener('sourceopen', onOpen, { once: true });
-      } else {
-        reject(new Error('No MediaSource initialized'));
-      }
+      mediaSource.value?.addEventListener('sourceopen', onOpen);
+      setTimeout(() => reject(new Error('MediaSource timeout')), 5000);
     });
   }
 
-  // ── Chunk fetching pipeline ─────────────────────────────────────
+  // ── Chunk Pipeline (Sequential for playback) ─────────────────────
 
-  /**
-   * Begin sequential chunk fetching for the current track.
-   * Chunks are fetched in order (0, 1, 2, ...) and appended to SourceBuffer.
-   */
-  function _startFetching(audioBaseUrl) {
-    if (_abortController) _abortController.abort();
-    _abortController = new AbortController();
+  async function _fetchNextChunkInSequence(index) {
+    if (_isShuttingDown || !currentTrackId.value || index >= Math.ceil(trackDuration.value / CHUNK_DURATION)) return;
+    if (_abortController?.signal.aborted) return;
 
-    // Fetch initial chunks eagerly — aim for at least 2 chunks (~60s) before starting playback
-    _fetchNextChunk(0, audioBaseUrl);
-  }
-
-  /**
-   * Fetch and append the next chunk in sequence.
-   * Recursively schedules itself via _onSourceBufferUpdateEnd to keep the pipeline flowing.
-   *
-   * @param {number} chunkIndex - Which chunk to fetch next
-   * @param {string} audioBaseUrl - Base URL for Range requests
-   */
-  async function _fetchNextChunk(chunkIndex, audioBaseUrl) {
-    if (_isShuttingDown || !currentTrackId.value || _abortController?.signal.aborted) return;
-    if (chunkIndex >= totalChunks.value) return; // all chunks fetched
-
-    // Skip already-fetched chunks
-    if (_fetchedChunks.has(chunkIndex)) {
-      // This shouldn't happen in sequential mode, but guard anyway
+    const cacheKey = `${currentTrackId.value}-${index}`;
+    const cachedBuffer = cache.get(cacheKey);
+    if (cachedBuffer) {
+      await _appendToSourceBuffer(index, cachedBuffer);
       return;
     }
 
     try {
-      const range = calculateChunkByteRange(chunkIndex, totalChunks.value, fileSize.value);
-      const buffer = await fetchChunk(audioBaseUrl, range.start, Math.min(range.end, fileSize.value - 1));
+      const range = calculateChunkByteRange(index, Math.ceil(trackDuration.value / CHUNK_DURATION), fileSize.value);
+      cache.markPending(cacheKey); 
+      const startTime = performance.now();
+      const buffer = await fetchChunk(_audioBaseUrl, range.start, range.end);
+      const endTime = performance.now();
 
-      if (_isShuttingDown || _abortController?.signal.aborted) return;
+      telemetry.recordDownload(buffer.byteLength, (endTime - startTime) / 1000);
+      cache.put(cacheKey, buffer);
+      telemetry.updateMemoryUsage(cache.totalSize);
 
-      // Append to SourceBuffer (this triggers updateend → recursive next-chunk fetch)
-      if (sourceBuffer.value && !sourceBuffer.value.updating) {
-        sourceBuffer.value.appendBuffer(buffer);
-        _fetchedChunks.add(chunkIndex);
-        loadProgress.value = Math.min(1, (_fetchedChunks.size / totalChunks.value));
-
-        // Log progress for debugging
-        if ((chunkIndex + 1) % 5 === 0 || chunkIndex === 0) {
-          console.log(`[MSE] Chunk ${chunkIndex + 1}/${totalChunks.value} appended (${(loadProgress.value * 100).toFixed(0)}%)`);
-        }
-      } else if (sourceBuffer.value?.updating) {
-        // SourceBuffer is busy — _onSourceBufferUpdateEnd will retry this chunk
-        console.log(`[MSE] SourceBuffer busy, queuing chunk ${chunkIndex} for after updateend`);
-        // Store the pending chunk index so we can resume in _onSourceBufferUpdateEnd
-        sourceBuffer.value._pendingChunk = { index: chunkIndex, url: _audioBaseUrl };
-      }
+      await _appendToSourceBuffer(index, buffer);
     } catch (err) {
-      if (_isShuttingDown || err.name === 'AbortError') return;
-
-      console.error(`[MSE] Failed to fetch chunk ${chunkIndex}:`, err);
-      error.value = err;
-
-      // Retry with exponential backoff for transient failures
-      const retryDelay = Math.min(INIT_RETRY_DELAY * 2, 3000);
-      setTimeout(() => {
-        if (!_isShuttingDown && currentTrackId.value) {
-          _fetchNextChunk(chunkIndex, audioBaseUrl);
-        }
-      }, retryDelay);
+      console.error(`[MSE] Chunk ${index} fetch error:`, err);
+      setTimeout(() => _fetchNextChunkInSequence(index), INIT_RETRY_DELAY);
     }
   }
 
-  /**
-   * Handler for SourceBuffer 'updateend' event — keeps the chunk pipeline flowing.
-   */
+  async function _appendToSourceBuffer(index, buffer) {
+    if (sourceBuffer.value && !sourceBuffer.value.updating) {
+      const currentIdx = Math.floor((audioEl.value?.currentTime || 0) / CHUNK_DURATION);
+      if (index < currentIdx) return; 
+
+      try {
+        sourceBuffer.value.appendBuffer(buffer);
+      } catch (e) {
+        console.error('[MSE] Append error:', e);
+        cache.remove(`${currentTrackId.value}-${index}`);
+      }
+    } else if (sourceBuffer.value?.updating) {
+      sourceBuffer.value._pendingChunk = index;
+    }
+  }
+
   function _onSourceBufferUpdateEnd() {
     if (_isShuttingDown || !currentTrackId.value) return;
-
-    // Check if there's a pending chunk (from when SourceBuffer was busy)
     const sb = sourceBuffer.value;
-    if (sb && sb._pendingChunk) {
-      const pending = sb._pendingChunk;
+    
+    if (sb && sb._pendingChunk !== undefined) {
+      const idx = sb._pendingChunk;
       delete sb._pendingChunk;
-      _fetchNextChunk(pending.index, pending.url);
+      _fetchNextChunkInSequence(idx);
       return;
     }
 
-    // Otherwise fetch the next sequential chunk
-    const nextIndex = _fetchedChunks.size;
-    if (nextIndex < totalChunks.value && _audioBaseUrl) {
-      _fetchNextChunk(nextIndex, _audioBaseUrl);
-    } else if (_fetchedChunks.size >= totalChunks.value) {
-      console.log('[MSE] All chunks fetched — track fully loaded');
+    const playheadSec = audioEl.value?.currentTime || 0;
+    const nextIdx = Math.floor(playheadSec / CHUNK_DURATION) + 1;
+    _fetchNextChunkInSequence(nextIdx);
+  }
+
+  // ── Prefetching (Background) ─────────────────────────────────────
+
+  function _startPrefetching() {
+    if (_prefetchInterval) clearInterval(_prefetchInterval);
+    _prefetchInterval = setInterval(async () => {
+      if (!currentTrackId.value || isBuffering()) return;
+
+      const predicted = predictNextChunks({
+        currentTrackIndex: 0, 
+        currentTimeInSeconds: audioEl.value?.currentTime || 0,
+        playlist: playlist.value,
+      }, {
+        loopRegion: loopRegion.value,
+        repeatMode: repeatMode.value
+      });
+
+      for (const { trackIndex, chunkIndex } of predicted) {
+        if (trackIndex === 0 && !cache.has(`${currentTrackId.value}-${chunkIndex}`)) {
+          _prefetchChunk(currentTrackId.value, chunkIndex);
+        }
+      }
+    }, 5000);
+  }
+
+  async function _prefetchChunk(targetTrackId, chunkIdx) {
+    if (cache.has(`${targetTrackId}-${chunkIdx}`)) return;
+    try {
+      const range = calculateChunkByteRange(chunkIdx, Math.ceil(trackDuration.value / CHUNK_DURATION), fileSize.value);
+      cache.markPending(`${targetTrackId}-${chunkIdx}`);
+      const startTime = performance.now();
+      const buffer = await fetchChunk(_audioBaseUrl, range.start, range.end);
+      const endTime = performance.now();
+
+      telemetry.recordDownload(buffer.byteLength, (endTime - startTime) / 1000);
+      cache.put(`${targetTrackId}-${chunkIdx}`, buffer);
+      telemetry.updateMemoryUsage(cache.totalSize);
+    } catch (err) {
+      console.warn(`[Prefetch] Chunk ${chunkIdx} failed:`, err);
+    } finally {
+      cache.unmarkPending(`${targetTrackId}-${chunkIdx}`);
     }
   }
 
-  // ── Playback control methods ────────────────────────────────────
+  function isBuffering() { return !audioEl.value?.paused; }
 
-  /**
-   * Start playback on the managed audio element.
-   * @returns {Promise<void>}
-   */
+  // ── Playback Control ─────────────────────────────────────────────
+
   async function play() {
     if (!audioEl.value) return;
-    try {
-      await audioEl.value.play();
-      playing.value = true;
-    } catch (err) {
-      if (err.name === 'NotAllowedError') {
-        error.value = new Error('Autoplay blocked — user interaction required');
-      } else {
-        error.value = err;
-      }
-      console.warn('[MSE] play() failed:', err);
-    }
+    try { await audioEl.value.play(); playing.value = true; } catch (err) { error.value = err; }
   }
 
-  /**
-   * Pause playback.
-   */
   function pause() {
-    if (!audioEl.value) return;
-    audioEl.value.pause();
+    audioEl.value?.pause();
     playing.value = false;
   }
 
-  /**
-   * Toggle between play and pause states.
-   */
   async function togglePlayPause() {
-    if (playing.value) {
-      pause();
-    } else {
-      await play();
-    }
+    if (playing.value) pause(); else await play();
   }
 
-  /**
-   * Seek to a specific time position (in seconds).
-   * The MSE buffer handles seeking within already-appended data seamlessly.
-   *
-   * @param {number} seconds - Target playback position in seconds
-   */
-  function seek(seconds) {
-    if (!audioEl.value) return;
-    audioEl.value.currentTime = Math.max(0, Math.min(seconds, trackDuration.value || Infinity));
-  }
+  function seek(seconds) { audioEl.value && (audioEl.value.currentTime = seconds); }
+  function setVolume(vol) { audioEl.value && (audioEl.value.volume = vol); }
+  function getCurrentTime() { return audioEl.value?.currentTime || 0; }
 
-  /**
-   * Set the playback volume (0.0 to 1.0).
-   * @param {number} vol - Volume level between 0 and 1
-   */
-  function setVolume(vol) {
-    if (!audioEl.value) return;
-    audioEl.value.volume = Math.max(0, Math.min(1, vol));
-  }
+  function updateBufferedRanges() { bufferedRanges.value = audioEl.value?.buffered ?? null; }
 
-  /**
-   * Get the current playback position in seconds.
-   * @returns {number}
-   */
-  function getCurrentTime() {
-    return audioEl.value?.currentTime ?? 0;
-  }
-
-  // ── Utility methods ─────────────────────────────────────────────
-
-  /**
-   * Update the bufferedRanges reactive ref from the audio element's buffered TimeRanges.
-   */
-  function updateBufferedRanges() {
-    bufferedRanges.value = audioEl.value?.buffered ?? null;
-  }
-
-  // ── Event binding helper ────────────────────────────────────────
-
-  /**
-   * Wire up audio element events to reactive state updates.
-   * Call this after the <audio> element is mounted in the component.
-   */
   function bindAudioEvents() {
     const el = audioEl.value;
     if (!el) return;
-
-    el.addEventListener('play', () => { playing.value = true; });
-    el.addEventListener('pause', () => { playing.value = false; });
-    el.addEventListener('ended', () => {
-      playing.value = false;
-      console.log('[MSE] Track ended');
-    });
-    el.addEventListener('error', (e) => {
-      const mediaError = e.target?.error;
-      error.value = mediaError ? new Error(`Media error: ${mediaError.message}`) : new Error('Unknown audio element error');
-    });
+    el.addEventListener('play', () => playing.value = true);
+    el.addEventListener('pause', () => playing.value = false);
+    el.addEventListener('ended', () => playing.value = false);
   }
 
   return {
-    // ── Reactive state (read-only for consumer) ───────────────────
-    playing,
-    bufferedRanges,
-    error,
-    mseSupported,
-    loadProgress,
-    currentTrackId,
-    trackDuration,
-    totalChunks,
-    fileSize,
-
-    // ── Control methods ───────────────────────────────────────────
-    initMediaSource,
-    shutdown,
-    loadTrack,
-    play,
-    pause,
-    togglePlayPause,
-    seek,
-    setVolume,
-    getCurrentTime,
-    updateBufferedRanges,
-    bindAudioEvents,
-
-    // ── Helpers exposed for testing / advanced usage ──────────────
-    _fetchNextChunk,
+    playing, bufferedRanges, error, mseSupported, loadProgress, currentTrackId,
+    trackDuration, playlist, loopRegion, repeatMode,
+    initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume, getCurrentTime, bindAudioEvents
   };
 }
-
-// ─── Module exports (non-composable utilities) ──────────────────────
-
-export { isMseAacSupported, calculateChunkByteRange, fetchChunk, CHUNK_DURATION, AAC_MIME_TYPE };
