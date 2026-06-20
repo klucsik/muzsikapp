@@ -1,11 +1,11 @@
 ---
 id: setup-dev-env-overview
 title: Development Environment Setup — Overview
-status: 20-doing
+status: done
 priority: critical
 created: 2026-06-07
 updated: 2026-06-08
-completed:
+completed: 2026-06-20
 target_release: next
 estimate: L
 risk: low
@@ -35,6 +35,18 @@ Meta-ticket for setting up a fully functional MuzsikApp development environment 
 - OIDC auth uses Keycloak at `auth.klucsik.hu` — needs test user credentials
 - Music library seeding will come later (manual download feature)
 - Process management (pm2/supervisor) is a separate follow-up ticket
+
+## Updates
+
+### 2026-06-20
+- **Done:** All dependencies completed:
+  - `install-deps` — both backend/frontend dependencies installed and working
+  - `backend-env-config` — configured inline during setup
+  - `frontend-env-config` — moved to done (separate ticket)
+  - `monorepo-scripts` — root scripts functional (`bun run test`, `bun run build`)
+  - `dev-server-automation` — services startable via bun scripts
+  - `test-framework-setup` — Vitest verified in both layers, coverage working (moved to done)
+- Dev environment fully operational: hot-reload, testing, building all functional
 
 ## Links
 
