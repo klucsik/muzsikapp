@@ -6,7 +6,8 @@
  */
 
 import { ref, computed } from 'vue';
-import { ChunkCache, predictNextChunks, CHUNK_DURATION } from '../services/chunkCache.js';
+import { ChunkCache } from '../services/chunkCache.js';
+import { predictNextChunks, CHUNK_DURATION } from '../services/prefetchPredictor.js';
 import { telemetry } from '../composables/useTelemetry.js';
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -41,6 +42,8 @@ async function fetchChunk(baseUrl, startByte, endByte) {
 
 // ─── Composable ──────────────────────────────────────────────────────
 
+export { isMseAacSupported };
+
 export function useMseBuffer() {
   const cache = new ChunkCache(50 * 1024 * 1024); // 50MB default budget
 
@@ -64,7 +67,21 @@ export function useMseBuffer() {
   const bufferedRanges = ref(null);
   const error = ref(null);
   const mseSupported = ref(isMseAacSupported());
-  const loadProgress = ref(0); 
+  const loadProgress = ref(0);
+
+  // Reactive cache stats for telemetry panel
+  const cacheSize = computed(() => cache.totalSize);
+  const pendingCount = computed(() => {
+    if (!cache.pendingIndices) return 0;
+    let count = 0;
+    for (const key of cache.pendingIndices) {
+      if (typeof key === 'number') count++;
+    }
+    return count;
+  });
+
+  // Speed limiter state
+  let _speedCapBytesPerSec = 0; // 0 = unlimited 
 
   let _fetchedChunksCount = 0;
   let _abortController = null;
@@ -323,9 +340,41 @@ export function useMseBuffer() {
     el.addEventListener('ended', () => playing.value = false);
   }
 
+  // ── Settings Setters ─────────────────────────────────────────────
+
+  function setCacheLimit(bytes) {
+    cache.maxCacheBytes = bytes;
+    telemetry.totalMemory.value = bytes;
+    // Evict if current usage exceeds new limit
+    while (cache.totalSize > cache.maxCacheBytes && cache.cacheMap.size > 0) {
+      const sortedEntries = [...cache.cacheMap.entries()]
+        .map(([index, entry]) => ({ index, ...entry }))
+        .sort((a, b) => a.timestamp - b.timestamp);
+      let evicted = false;
+      for (const entry of sortedEntries) {
+        if (cache.totalSize <= cache.maxCacheBytes) break;
+        if (!cache.protectedPool.has(entry.index)) {
+          cache.remove(entry.index);
+          evicted = true;
+          break; // re-sort after each eviction
+        }
+      }
+      if (!evicted) break;
+    }
+    telemetry.updateMemoryUsage(cache.totalSize);
+  }
+
+  function setSpeedCap(bytesPerSec) {
+    _speedCapBytesPerSec = bytesPerSec;
+  }
+
+  // ── Public API ───────────────────────────────────────────────────
+
   return {
     playing, bufferedRanges, error, mseSupported, loadProgress, currentTrackId,
     trackDuration, playlist, loopRegion, repeatMode,
-    initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume, getCurrentTime, bindAudioEvents
+    cacheSize, pendingCount,
+    initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume, getCurrentTime, bindAudioEvents,
+    updateBufferedRanges, setCacheLimit, setSpeedCap
   };
 }

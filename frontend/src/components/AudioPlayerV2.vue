@@ -103,12 +103,26 @@
       />
       <span class="volume-value">{{ (volume * 100).toFixed(0) }}%</span>
     </div>
+
+    <!-- Settings & Telemetry Panel -->
+    <SettingsPanel
+      :used-memory="telemetryData.usedMemory"
+      :total-memory="telemetryData.totalMemory"
+      :speed-history="telemetryData.speedHistory"
+      :stall-count="telemetryData.stallCount"
+      :total-stall-duration="telemetryData.totalStallDuration"
+      :cached-chunks="mse.cacheSize.value || 0"
+      :downloading-count="mse.pendingCount.value || 0"
+      @update-cache-limit="onUpdateCacheLimit"
+      @update-speed-cap="onUpdateSpeedCap"
+    />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useMseBuffer, isMseAacSupported } from '../composables/useMseBuffer.js';
+import SettingsPanel from './SettingsPanel.vue';
 import api from '../services/api';
 
 // ── Props / Emits ────────────────────────────────────────────────
@@ -124,6 +138,27 @@ const emit = defineEmits(['next-track', 'previous-track']);
 // ── MSE Buffer Composable ────────────────────────────────────────
 
 const mse = useMseBuffer();
+import { telemetry } from '../composables/useTelemetry.js';
+
+// ── Telemetry Data for SettingsPanel ─────────────────────────────
+
+const telemetryData = computed(() => ({
+  usedMemory:      telemetry.usedMemory.value,
+  totalMemory:     telemetry.totalMemory.value,
+  speedHistory:    telemetry.speedHistory.value,
+  stallCount:      telemetry.stallCount.value,
+  totalStallDuration: telemetry.totalStallDuration.value,
+}));
+
+// ── Settings Handlers ────────────────────────────────────────────
+
+function onUpdateCacheLimit(bytes) {
+  mse.setCacheLimit(bytes);
+}
+
+function onUpdateSpeedCap(bytesPerSec) {
+  mse.setSpeedCap(bytesPerSec);
+}
 
 // ── Local State ──────────────────────────────────────────────────
 

@@ -22,8 +22,18 @@ export class ChunkCache {
   }
 
   /**
+   * Gets the cached buffer for a given index.
+   * @param {*} key - Cache key (string or number)
+   * @returns {ArrayBuffer|undefined} The cached buffer, or undefined if not found
+   */
+  get(key) {
+    const entry = this.cacheMap.get(key);
+    return entry ? entry.buffer : undefined;
+  }
+
+  /**
    * Checks if a chunk is currently in cache or being downloaded.
-   * @param {number} index - Zero-based chunk index
+   * @param {number} index - Zero-based chunk index (or string key)
    * @returns {boolean} true if cached OR currently downloading
    */
   has(index) {
