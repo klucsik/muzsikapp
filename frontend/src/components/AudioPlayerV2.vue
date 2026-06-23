@@ -125,6 +125,11 @@ import { useMseBuffer, isMseAacSupported } from '../composables/useMseBuffer.js'
 import SettingsPanel from './SettingsPanel.vue';
 import api from '../services/api';
 
+// ── Logging helper ────────────────────────────────────────────────
+const log = (...args) => console.log('[V2]', ...args);
+const warn = (...args) => console.warn('[V2]', ...args);
+const err = (...args) => console.error('[V2]', ...args);
+
 // ── Props / Emits ────────────────────────────────────────────────
 
 const props = defineProps({
@@ -224,13 +229,15 @@ const formatTime = (seconds) => {
 // ── Playback Control ─────────────────────────────────────────────
 
 async function handlePlayPauseClick() {
-  if (mseError.value) return;
+  log('play/pause clicked, currentTrack:', !!currentTrack.value, 'mseError:', !!mseError.value, 'audioEl:', !!audioElement.value);
+  if (mseError.value) { warn('blocked by error'); return; }
 
   try {
     mse.togglePlayPause();
     isPlaying.value = mse.playing.value;
+    log('play/pause toggled — playing:', isPlaying.value);
   } catch (err) {
-    console.error('[V2 Player] toggle failed:', err);
+    err('toggle failed:', err.message || err);
     mseError.value = err;
   }
 }
@@ -285,13 +292,17 @@ function onVolumeChange(event) {
 // ── Track Loading ────────────────────────────────────────────────
 
 async function loadTrackIntoMse(trackId) {
+  log('loadTrackIntoMse called with:', trackId);
+  log('audioElement ready?', !!audioElement.value, 'el tag:', audioElement.value?.tagName);
   isBuffering.value = true;
   bufferMessage.value = 'Loading track...';
   mseError.value = null;
 
   try {
     // Fetch track metadata to get duration
+    log('fetching track metadata for:', trackId);
     const trackData = await api.getTrack(trackId);
+    log('track data received:', { id: trackData.id, title: trackData.title, duration: trackData.duration, fileSize: trackData.file_size });
     currentTrack.value = {
       id: trackData.id,
       title: trackData.title || 'Unknown Title',
@@ -302,19 +313,25 @@ async function loadTrackIntoMse(trackId) {
     duration.value = trackData.duration || 0;
 
     const audioUrl = api.getAudioUrl(trackId);
+    log('audio URL:', audioUrl);
 
     // Initialize MSE pipeline and start chunk fetching
+    log('calling mse.loadTrack...');
     await mse.loadTrack(trackId, audioUrl, audioElement.value, trackData.duration);
+    log('mse.loadTrack completed');
 
     // Bind audio element events for reactive state updates
     mse.bindAudioEvents();
+    log('audio events bound');
 
     // Set initial volume
     mse.setVolume(volume.value);
+    log('volume set to:', volume.value);
 
     isBuffering.value = false;
+    log('track loaded successfully — buffering overlay hidden');
   } catch (err) {
-    console.error('[V2 Player] Failed to load track:', err);
+    err('Failed to load track:', err.message || err, 'stack:', (err.stack||'').split('\n').slice(0,3).join('\n'));
     mseError.value = err;
     isBuffering.value = false;
   }
@@ -324,10 +341,13 @@ async function loadTrackIntoMse(trackId) {
 
 watch(
   () => props.currentTrackId,
-  (newId) => {
+  (newId, oldId) => {
+    log('trackId watch fired:', { newId, oldId });
     if (newId && newId !== mse.currentTrackId.value) {
+      log('loading track into MSE:', newId);
       loadTrackIntoMse(newId);
     } else if (!newId) {
+      log('track cleared — shutting down MSE');
       // Track cleared — shut down MSE pipeline
       mse.shutdown();
       currentTrack.value = null;
@@ -346,8 +366,15 @@ function startTimeUpdates() {
   stopTimeUpdates();
   _timeUpdateInterval = setInterval(() => {
     if (audioElement.value) {
-      currentTime.value = mse.getCurrentTime();
+      const t = mse.getCurrentTime();
+      currentTime.value = t;
       mse.updateBufferedRanges();
+      // Log playback state periodically for debugging
+      if (mse.playing.value && Math.floor(t * 4) % 8 === 0) {
+        log('tick — time:', t.toFixed(1), 'duration:', duration.value, 'playing:', mse.playing.value);
+      }
+    } else {
+      warn('time update: audioElement is null');
     }
   }, 250); // Update every 250ms for smooth progress bar
 }
@@ -362,18 +389,25 @@ function stopTimeUpdates() {
 // ── Lifecycle ────────────────────────────────────────────────────
 
 onMounted(async () => {
+  log('onMounted');
   // Check MSE support
-  if (!isMseAacSupported()) {
-    console.warn('[V2 Player] MSE with AAC not supported — consider V1 fallback');
+  const supported = isMseAacSupported();
+  log('MSE+AAC supported?', supported);
+  if (!supported) {
+    warn('MSE with AAC not supported — consider V1 fallback');
   }
 
   // Start time update loop
   startTimeUpdates();
+  log('time updates started (250ms interval)');
 
   // Set initial volume on the audio element once it's ready
   await nextTick();
   if (audioElement.value) {
     audioElement.value.volume = volume.value;
+    log('audio element ready, volume set to:', volume.value);
+  } else {
+    warn('audioElement still null after nextTick!');
   }
 });
 

@@ -134,6 +134,9 @@
 <script setup>
 import { ref, computed, watch } from 'vue';
 
+// ── Logging ──────────────────────────────────────────────────────
+function log(...args) { console.log('[Settings]', ...args); }
+
 // ── Props / Emits ────────────────────────────────────────────────
 
 const props = defineProps({
@@ -270,6 +273,12 @@ function formatBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + sizes[i];
 }
+
+// ── Watch telemetry changes (debug) ─────────────────────────────
+
+watch(() => props.cachedChunks, (val) => {
+  log('telemetry update — cached:', val, 'downloading:', props.downloadingCount, 'stalls:', props.stallCount);
+});
 
 // ── Expose for parent access ─────────────────────────────────────
 

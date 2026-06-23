@@ -190,9 +190,11 @@ export default {
           playlistIndex = playlistIndex >= 0 ? playlistIndex : null;
         }
         
+        console.log('[App] playTrack called — track:', track?.id, 'playerMode:', playerMode.value);
         await api.playTrack(track.id, 0, currentRoomId.value, playlistIndex);
         currentTrackId.value = track.id;
         currentTrack.value = track;
+        console.log('[App] currentTrackId set to:', currentTrackId.value);
       } catch (error) {
         console.error('Failed to play track:', error);
         toast.error('Failed to play track. Check console for details.');
@@ -255,9 +257,11 @@ export default {
     };
 
     const handlePlayTrack = (data) => {
+      console.log('[App] WS play_track event:', data?.trackId, 'playerMode:', playerMode?.value);
       // Only update if it's for current room or no room specified
       if (!data.roomId || data.roomId === currentRoomId.value) {
         currentTrackId.value = data.trackId;
+        console.log('[App] WS handler set currentTrackId to:', data.trackId);
         // Fetch full track info if needed
         if (data.trackId) {
           api.getTrack(data.trackId)

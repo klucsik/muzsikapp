@@ -10,6 +10,11 @@ import { ChunkCache } from '../services/chunkCache.js';
 import { predictNextChunks, CHUNK_DURATION } from '../services/prefetchPredictor.js';
 import { telemetry } from '../composables/useTelemetry.js';
 
+// ─── Logging ─────────────────────────────────────────────────────────
+function log(...args) { console.log('[MSE]', ...args); }
+function warn(...args) { console.warn('[MSE]', ...args); }
+function err(...args) { console.error('[MSE]', ...args); }
+
 // ─── Constants ───────────────────────────────────────────────────────
 
 const AAC_MIME_TYPE = 'audio/mp4; codecs="mp4a.40.2"';
@@ -93,16 +98,23 @@ export function useMseBuffer() {
   // ── Core Lifecycle ─────────────────────────────────────────────
 
   function initMediaSource(el) {
-    if (_isShuttingDown) return;
-    shutdown();
+    log('initMediaSource — el:', !!el, 'type:', el?.tagName);
+    if (_isShuttingDown) { warn('initMediaSource blocked by shutdown'); return; }
+    shutdown(true);
+
     const ms = new MediaSource();
     mediaSource.value = ms;
+    log('created MediaSource, readyState:', ms.readyState);
     el.src = URL.createObjectURL(ms);
+    log('set audio element src to blob URL');
 
     ms.addEventListener('sourceopen', async () => {
+      log('MediaSource sourceopen event — readyState:', ms.readyState);
       try {
         const sb = ms.addSourceBuffer(AAC_MIME_TYPE);
         sourceBuffer.value = sb;
+        log('SourceBuffer created for MIME:', AAC_MIME_TYPE);
+
         sb.addEventListener('updateend', () => {
           if (!_isShuttingDown && currentTrackId.value) {
             updateBufferedRanges();
@@ -110,6 +122,7 @@ export function useMseBuffer() {
           }
         });
       } catch (err) {
+        err('failed to add SourceBuffer:', err.message || err);
         error.value = err;
       }
     });
@@ -135,8 +148,9 @@ export function useMseBuffer() {
     }, 1000);
   }
 
-  function shutdown() {
-    if (_stallDetectionInterval) clearInterval(_stallDetectionInterval);
+  function shutdown(silent = false) {
+    if (!silent) log('shutdown called');
+    if (_stallDetectionInterval) { clearInterval(_stallDetectionInterval); _stallDetectionInterval = null; }
     if (_isShuttingDown) return;
     _isShuttingDown = true;
     
@@ -167,24 +181,35 @@ export function useMseBuffer() {
   }
 
   async function loadTrack(trackId, audioBaseUrl, audioElRef, duration) {
+    log('loadTrack:', trackId, 'baseUrl:', audioBaseUrl, 'el:', !!audioElRef, 'duration:', duration);
     shutdown();
     currentTrackId.value = trackId;
     _audioBaseUrl = audioBaseUrl;
     error.value = null;
 
     initMediaSource(audioElRef);
+    log('waiting for MediaSource sourceopen...');
     await waitForSourceOpen();
+    log('sourceopen ready, sourceBuffer exists?', !!sourceBuffer.value);
 
-    if (!sourceBuffer.value || error.value) return;
+    if (!sourceBuffer.value || error.value) {
+      err('loadTrack aborted: sourceBuffer=', !!sourceBuffer.value, 'error=', error.value?.message);
+      return;
+    }
 
     try {
+      log('fetching HEAD for file size:', audioBaseUrl);
       const headResp = await fetch(audioBaseUrl, { method: 'HEAD' });
+      if (!headResp.ok) err(`HEAD request failed with status ${headResp.status}`);
       fileSize.value = parseInt(headResp.headers.get('Content-Length') || '0', 10);
       trackDuration.value = duration || parseFloat(headResp.headers.get('X-Track-Duration')) || 0;
+      log('fileSize:', fileSize.value, 'trackDuration:', trackDuration.value);
 
       _startPrefetching();
+      log('prefetching started, fetching first chunk...');
       await _fetchNextChunkInSequence(0);
     } catch (err) {
+      err('loadTrack failed:', err.message || err);
       error.value = err;
     }
   }
@@ -192,59 +217,72 @@ export function useMseBuffer() {
   function waitForSourceOpen() {
     return new Promise((resolve, reject) => {
       const onOpen = () => {
+        log('waitForSourceOpen: sourceopen event received');
         if (mediaSource.value?.readyState === 'open') {
           mediaSource.value.removeEventListener('sourceopen', onOpen);
           resolve();
         }
       };
       mediaSource.value?.addEventListener('sourceopen', onOpen);
-      setTimeout(() => reject(new Error('MediaSource timeout')), 5000);
+      const timer = setTimeout(() => {
+        err('MediaSource sourceopen timed out after 5s, readyState:', mediaSource.value?.readyState);
+        reject(new Error('MediaSource timeout'));
+      }, 5000);
     });
   }
 
   // ── Chunk Pipeline (Sequential for playback) ─────────────────────
 
   async function _fetchNextChunkInSequence(index) {
-    if (_isShuttingDown || !currentTrackId.value || index >= Math.ceil(trackDuration.value / CHUNK_DURATION)) return;
+    if (_isShuttingDown || !currentTrackId.value) return;
+    const totalChunks = Math.ceil(trackDuration.value / CHUNK_DURATION);
+    if (index >= totalChunks) { log(`chunk ${index} >= totalChunks ${totalChunks}, stopping`); return; }
     if (_abortController?.signal.aborted) return;
 
     const cacheKey = `${currentTrackId.value}-${index}`;
     const cachedBuffer = cache.get(cacheKey);
     if (cachedBuffer) {
+      log(`chunk ${index}: HIT in cache (${cachedBuffer.byteLength} bytes)`);
       await _appendToSourceBuffer(index, cachedBuffer);
       return;
     }
 
     try {
-      const range = calculateChunkByteRange(index, Math.ceil(trackDuration.value / CHUNK_DURATION), fileSize.value);
+      const range = calculateChunkByteRange(index, totalChunks, fileSize.value);
+      log(`chunk ${index}: fetching bytes=${range.start}-${range.end}`);
       cache.markPending(cacheKey); 
       const startTime = performance.now();
       const buffer = await fetchChunk(_audioBaseUrl, range.start, range.end);
-      const endTime = performance.now();
+      const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
 
-      telemetry.recordDownload(buffer.byteLength, (endTime - startTime) / 1000);
+      telemetry.recordDownload(buffer.byteLength, (elapsed) / 1);
       cache.put(cacheKey, buffer);
       telemetry.updateMemoryUsage(cache.totalSize);
+      log(`chunk ${index}: fetched ${buffer.byteLength} bytes in ${elapsed}s`);
 
       await _appendToSourceBuffer(index, buffer);
     } catch (err) {
-      console.error(`[MSE] Chunk ${index} fetch error:`, err);
+      err(`chunk ${index} fetch error:`, err.message || err);
       setTimeout(() => _fetchNextChunkInSequence(index), INIT_RETRY_DELAY);
     }
   }
 
   async function _appendToSourceBuffer(index, buffer) {
-    if (sourceBuffer.value && !sourceBuffer.value.updating) {
+    if (!sourceBuffer.value) { warn(`chunk ${index}: no sourceBuffer`); return; }
+
+    if (!sourceBuffer.value.updating) {
       const currentIdx = Math.floor((audioEl.value?.currentTime || 0) / CHUNK_DURATION);
-      if (index < currentIdx) return; 
+      if (index < currentIdx) { log(`chunk ${index}: skipped (behind playhead at chunk ${currentIdx})`); return; }
 
       try {
+        log(`chunk ${index}: appending to SourceBuffer (${buffer.byteLength} bytes)`);
         sourceBuffer.value.appendBuffer(buffer);
       } catch (e) {
-        console.error('[MSE] Append error:', e);
+        err('append error:', e.message || e);
         cache.remove(`${currentTrackId.value}-${index}`);
       }
     } else if (sourceBuffer.value?.updating) {
+      log(`chunk ${index}: queued (SourceBuffer updating)`);
       sourceBuffer.value._pendingChunk = index;
     }
   }
@@ -313,21 +351,37 @@ export function useMseBuffer() {
   // ── Playback Control ─────────────────────────────────────────────
 
   async function play() {
-    if (!audioEl.value) return;
-    try { await audioEl.value.play(); playing.value = true; } catch (err) { error.value = err; }
+    log('play called, audioEl:', !!audioEl.value);
+    if (!audioEl.value) { warn('play: no audio element'); return; }
+    try {
+      log('calling audio.play()...');
+      await audioEl.value.play();
+      playing.value = true;
+      log('playing!');
+    } catch (err) {
+      err('play failed:', err.message || err);
+      error.value = err;
+    }
   }
 
   function pause() {
+    log('pause called');
     audioEl.value?.pause();
     playing.value = false;
   }
 
   async function togglePlayPause() {
-    if (playing.value) pause(); else await play();
+    if (playing.value) { log('toggle: pausing'); pause(); } else { log('toggle: playing'); await play(); }
   }
 
-  function seek(seconds) { audioEl.value && (audioEl.value.currentTime = seconds); }
-  function setVolume(vol) { audioEl.value && (audioEl.value.volume = vol); }
+  function seek(seconds) {
+    log('seek to:', seconds);
+    audioEl.value && (audioEl.value.currentTime = seconds);
+  }
+  function setVolume(vol) {
+    log('set volume:', vol, 'audioEl:', !!audioEl.value);
+    audioEl.value && (audioEl.value.volume = vol);
+  }
   function getCurrentTime() { return audioEl.value?.currentTime || 0; }
 
   function updateBufferedRanges() { bufferedRanges.value = audioEl.value?.buffered ?? null; }
@@ -343,6 +397,7 @@ export function useMseBuffer() {
   // ── Settings Setters ─────────────────────────────────────────────
 
   function setCacheLimit(bytes) {
+    log('setCacheLimit:', bytes, 'current used:', cache.totalSize);
     cache.maxCacheBytes = bytes;
     telemetry.totalMemory.value = bytes;
     // Evict if current usage exceeds new limit
