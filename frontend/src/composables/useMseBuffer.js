@@ -168,6 +168,7 @@ export function useMseBuffer() {
     }
 
     mediaSource.value = null;
+    audioEl.value = null;
     currentTrackId.value = null;
     trackDuration.value = 0;
     fileSize.value = 0;
@@ -186,6 +187,10 @@ export function useMseBuffer() {
     currentTrackId.value = trackId;
     _audioBaseUrl = audioBaseUrl;
     error.value = null;
+
+    // Store the audio element reference for playback controls
+    audioEl.value = audioElRef;
+    log('stored audioEl ref, now:', !!audioEl.value);
 
     initMediaSource(audioElRef);
     log('waiting for MediaSource sourceopen...');
@@ -216,15 +221,17 @@ export function useMseBuffer() {
 
   function waitForSourceOpen() {
     return new Promise((resolve, reject) => {
+      let timerId = null;
       const onOpen = () => {
         log('waitForSourceOpen: sourceopen event received');
         if (mediaSource.value?.readyState === 'open') {
           mediaSource.value.removeEventListener('sourceopen', onOpen);
+          clearTimeout(timerId); // clear timeout — we succeeded
           resolve();
         }
       };
       mediaSource.value?.addEventListener('sourceopen', onOpen);
-      const timer = setTimeout(() => {
+      timerId = setTimeout(() => {
         err('MediaSource sourceopen timed out after 5s, readyState:', mediaSource.value?.readyState);
         reject(new Error('MediaSource timeout'));
       }, 5000);
