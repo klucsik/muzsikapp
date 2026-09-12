@@ -36,9 +36,10 @@ function calculateChunkByteRange(chunkIndex, totalChunks, fileSize) {
   return { start, end: Math.min(end, fileSize - 1) };
 }
 
-async function fetchChunk(baseUrl, startByte, endByte) {
+async function fetchChunk(baseUrl, startByte, endByte, signal) {
   const response = await fetch(baseUrl, {
     headers: { 'Range': `bytes=${startByte}-${endByte}` },
+    signal,
   });
   if (response.status === 416) throw new Error('Range not satisfiable');
   if (!response.ok || response.status !== 206) throw new Error(`Fetch failed: ${response.status}`);
@@ -90,6 +91,7 @@ export function useMseBuffer() {
 
   let _fetchedChunksCount = 0;
   let _abortController = null;
+  let _sequentialFetchInFlight = false;
   let _isShuttingDown = false;
   let _prefetchInterval = null;
   let _audioBaseUrl = '';
@@ -121,9 +123,9 @@ export function useMseBuffer() {
             _onSourceBufferUpdateEnd();
           }
         });
-      } catch (err) {
-        err('failed to add SourceBuffer:', err.message || err);
-        error.value = err;
+      } catch (e) {
+        err('failed to add SourceBuffer:', e.message || e);
+        error.value = e;
       }
     });
 
@@ -192,6 +194,10 @@ export function useMseBuffer() {
     audioEl.value = audioElRef;
     log('stored audioEl ref, now:', !!audioEl.value);
 
+    // Fresh abort controller per track — shutdown() aborts the previous one and
+    // it is never reused, otherwise every chunk fetch would bail out silently.
+    _abortController = new AbortController();
+
     initMediaSource(audioElRef);
     log('waiting for MediaSource sourceopen...');
     await waitForSourceOpen();
@@ -213,9 +219,9 @@ export function useMseBuffer() {
       _startPrefetching();
       log('prefetching started, fetching first chunk...');
       await _fetchNextChunkInSequence(0);
-    } catch (err) {
-      err('loadTrack failed:', err.message || err);
-      error.value = err;
+    } catch (e) {
+      err('loadTrack failed:', e.message || e);
+      error.value = e;
     }
   }
 
@@ -241,10 +247,11 @@ export function useMseBuffer() {
   // ── Chunk Pipeline (Sequential for playback) ─────────────────────
 
   async function _fetchNextChunkInSequence(index) {
-    if (_isShuttingDown || !currentTrackId.value) return;
+    if (_isShuttingDown) { warn(`chunk ${index}: skipped (shutting down)`); return; }
+    if (!currentTrackId.value) { warn(`chunk ${index}: skipped (no current track)`); return; }
     const totalChunks = Math.ceil(trackDuration.value / CHUNK_DURATION);
     if (index >= totalChunks) { log(`chunk ${index} >= totalChunks ${totalChunks}, stopping`); return; }
-    if (_abortController?.signal.aborted) return;
+    if (_abortController?.signal.aborted) { warn(`chunk ${index}: skipped (aborted)`); return; }
 
     const cacheKey = `${currentTrackId.value}-${index}`;
     const cachedBuffer = cache.get(cacheKey);
@@ -259,17 +266,25 @@ export function useMseBuffer() {
       log(`chunk ${index}: fetching bytes=${range.start}-${range.end}`);
       cache.markPending(cacheKey); 
       const startTime = performance.now();
-      const buffer = await fetchChunk(_audioBaseUrl, range.start, range.end);
-      const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+      _sequentialFetchInFlight = true;
+      let buffer;
+      try {
+        buffer = await fetchChunk(_audioBaseUrl, range.start, range.end, _abortController?.signal);
+      } finally {
+        _sequentialFetchInFlight = false;
+      }
+      const elapsedSec = (performance.now() - startTime) / 1000;
 
-      telemetry.recordDownload(buffer.byteLength, (elapsed) / 1);
+      telemetry.recordDownload(buffer.byteLength, elapsedSec);
       cache.put(cacheKey, buffer);
       telemetry.updateMemoryUsage(cache.totalSize);
-      log(`chunk ${index}: fetched ${buffer.byteLength} bytes in ${elapsed}s`);
+      log(`chunk ${index}: fetched ${buffer.byteLength} bytes in ${elapsedSec.toFixed(2)}s`);
 
       await _appendToSourceBuffer(index, buffer);
-    } catch (err) {
-      err(`chunk ${index} fetch error:`, err.message || err);
+    } catch (e) {
+      _sequentialFetchInFlight = false;
+      if (e?.name === 'AbortError') { log(`chunk ${index}: fetch aborted`); return; }
+      err(`chunk ${index} fetch error:`, e.message || e);
       setTimeout(() => _fetchNextChunkInSequence(index), INIT_RETRY_DELAY);
     }
   }
@@ -315,7 +330,9 @@ export function useMseBuffer() {
   function _startPrefetching() {
     if (_prefetchInterval) clearInterval(_prefetchInterval);
     _prefetchInterval = setInterval(async () => {
-      if (!currentTrackId.value || isBuffering()) return;
+      // Skip only while a sequential (playback-critical) fetch is in flight —
+      // NOT while playing: prefetching exists precisely for the playing case.
+      if (!currentTrackId.value || _sequentialFetchInFlight) return;
 
       const predicted = predictNextChunks({
         currentTrackIndex: 0, 
@@ -365,9 +382,9 @@ export function useMseBuffer() {
       await audioEl.value.play();
       playing.value = true;
       log('playing!');
-    } catch (err) {
-      err('play failed:', err.message || err);
-      error.value = err;
+    } catch (e) {
+      err('play failed:', e.message || e);
+      error.value = e;
     }
   }
 

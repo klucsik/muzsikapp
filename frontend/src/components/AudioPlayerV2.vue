@@ -236,9 +236,9 @@ async function handlePlayPauseClick() {
     mse.togglePlayPause();
     isPlaying.value = mse.playing.value;
     log('play/pause toggled — playing:', isPlaying.value);
-  } catch (err) {
-    err('toggle failed:', err.message || err);
-    mseError.value = err;
+  } catch (e) {
+    err('toggle failed:', e.message || e);
+    mseError.value = e;
   }
 }
 
@@ -330,9 +330,9 @@ async function loadTrackIntoMse(trackId) {
 
     isBuffering.value = false;
     log('track loaded successfully — buffering overlay hidden');
-  } catch (err) {
-    err('Failed to load track:', err.message || err, 'stack:', (err.stack||'').split('\n').slice(0,3).join('\n'));
-    mseError.value = err;
+  } catch (e) {
+    err('Failed to load track:', e.message || e, 'stack:', (e.stack||'').split('\n').slice(0,3).join('\n'));
+    mseError.value = e;
     isBuffering.value = false;
   }
 }
