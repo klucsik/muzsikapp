@@ -45,6 +45,12 @@ const config = {
   youtubeSearchLimit: parseInt(process.env.YOUTUBE_SEARCH_LIMIT || '10', 10),
   youtubeSearchTimeout: parseInt(process.env.YOUTUBE_SEARCH_TIMEOUT || '30000', 10), // 30 seconds
   
+  // V2 player segmentation (fragmented-mp4 remux of progressive files for MSE)
+  ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+  segmentsDir: process.env.SEGMENTS_DIR || join(__dirname, '../../data/segments'),
+  segmentDuration: parseInt(process.env.SEGMENT_DURATION || '30', 10), // seconds per segment
+  segmentTimeoutMs: parseInt(process.env.SEGMENT_TIMEOUT_MS || '120000', 10),
+
   // External Links
   addMusicUrl: process.env.ADD_MUSIC_URL || '',
   addMusicText: process.env.ADD_MUSIC_TEXT || 'Click "Continue" to open the music source in a new tab.',

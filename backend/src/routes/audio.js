@@ -4,6 +4,7 @@ import { join } from 'path';
 import { trackQueries } from '../db/database.js';
 import config from '../config/config.js';
 import logger from '../utils/logger.js';
+import { getManifest, getInitFile, getSegmentFile } from '../services/segmenter.js';
 
 const router = express.Router();
 
@@ -133,6 +134,85 @@ router.get('/:trackId', (req, res) => {
         message: error.message,
       });
     }
+  }
+});
+
+/**
+ * V2 player (MSE) endpoints.
+ *
+ * Progressive MP4 cannot be fed to a SourceBuffer, so the backend remuxes it into
+ * fragmented segments on first request and caches the result. A track that is not
+ * segmentable answers 415 with `fallback: 'v1'` so the client can switch players.
+ */
+
+const SEGMENT_STATUS = {
+  UNSUPPORTED_FORMAT: 415,
+  SOURCE_MISSING: 404,
+  NOT_SEGMENTED: 404,
+  SEGMENT_OUT_OF_RANGE: 404,
+};
+
+function segmentError(res, error, trackId) {
+  const status = SEGMENT_STATUS[error.code] || 500;
+  logger[status === 500 ? 'error' : 'warn'](
+    { trackId, code: error.code, message: error.message },
+    'Segment request failed',
+  );
+  res.status(status).json({
+    error: error.code || 'SEGMENT_FAILED',
+    message: error.message,
+    ...(error.code === 'UNSUPPORTED_FORMAT' ? { fallback: 'v1' } : {}),
+  });
+}
+
+/**
+ * GET /api/audio/:trackId/manifest
+ * Triggers conversion when needed. This is the V2 "switchover" call.
+ */
+router.get('/:trackId/manifest', async (req, res) => {
+  const track = trackQueries.getById(req.params.trackId);
+  if (!track) {
+    return res.status(404).json({ error: 'Track not found', id: req.params.trackId });
+  }
+
+  try {
+    const manifest = await getManifest(track, { force: req.query.force === '1' });
+    res.setHeader('Cache-Control', 'no-cache');
+    res.json(manifest);
+  } catch (error) {
+    segmentError(res, error, track.id);
+  }
+});
+
+/**
+ * GET /api/audio/:trackId/init   — the ftyp+moov init segment
+ */
+router.get('/:trackId/init', async (req, res) => {
+  try {
+    const { manifest, path } = await getInitFile(req.params.trackId);
+    res.setHeader('Content-Type', manifest.mime);
+    res.sendFile(path, { cacheControl: true, maxAge: 31536000000, immutable: true }, (err) => {
+      if (err && !res.headersSent) segmentError(res, err, req.params.trackId);
+    });
+  } catch (error) {
+    segmentError(res, error, req.params.trackId);
+  }
+});
+
+/**
+ * GET /api/audio/:trackId/segment/:index
+ */
+router.get('/:trackId/segment/:index', async (req, res) => {
+  try {
+    const { manifest, segment, path } = await getSegmentFile(req.params.trackId, req.params.index);
+    res.setHeader('Content-Type', manifest.mime);
+    res.setHeader('X-Track-Duration', String(manifest.duration));
+    res.setHeader('X-Range', `${segment.start}-${segment.end}`);
+    res.sendFile(path, { cacheControl: true, maxAge: 31536000000, immutable: true }, (err) => {
+      if (err && !res.headersSent) segmentError(res, err, req.params.trackId);
+    });
+  } catch (error) {
+    segmentError(res, error, req.params.trackId);
   }
 });
 
