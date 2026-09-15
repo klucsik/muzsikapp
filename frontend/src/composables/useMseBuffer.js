@@ -21,6 +21,9 @@ const err = (...args) => console.error('[MSE]', ...args);
 const DEFAULT_MIME = 'audio/mp4; codecs="mp4a.40.2"';
 const INIT_RETRY_DELAY = 150;
 const PREFETCH_INTERVAL_MS = 5000;
+// How much audio to keep buffered in front of the playhead. Without a bound the sequential
+// chain walks to the end of the track and downloads a 60-minute file on the first click.
+const PREFETCH_LOOKAHEAD_SEC = 90;
 const MAX_APPEND_RETRIES = 2;
 
 export function isMseSupported(mimeType = DEFAULT_MIME) {
@@ -371,10 +374,23 @@ export function useMseBuffer() {
   }
 
   function nextFragment(previousIndex) {
-    const playheadIndex = fragmentIndexForTime(audioEl.value?.currentTime || 0);
+    const currentTime = audioEl.value?.currentTime || 0;
+    if (bufferedAheadSec(currentTime) > PREFETCH_LOOKAHEAD_SEC) return undefined; // prefetch loop resumes
+    const playheadIndex = fragmentIndexForTime(currentTime);
     const next = Math.max(previousIndex + 1, playheadIndex);
     if (next < previousIndex + 1 || next >= fragmentCount.value) return undefined;
     return fetchFragmentInSequence(next);
+  }
+
+  /** Seconds of decoded audio already buffered in front of `currentTime`. */
+  function bufferedAheadSec(currentTime) {
+    const buffered = audioEl.value?.buffered;
+    if (!buffered) return 0;
+    let end = currentTime;
+    for (let i = 0; i < buffered.length; i += 1) {
+      if (buffered.start(i) <= currentTime + 0.5 && buffered.end(i) > end) end = buffered.end(i);
+    }
+    return Math.max(end - currentTime, 0);
   }
 
   /** Respects the user's bandwidth cap by padding out the download time. */
@@ -486,6 +502,18 @@ export function useMseBuffer() {
       // Always keep the next couple of fragments warm, predictor or not.
       for (let offset = 1; offset <= 2; offset += 1) {
         if (currentIndex + offset < fragmentCount.value) wanted.add(currentIndex + offset);
+      }
+
+      // The sequential chain stops once it is far enough ahead; wake it when the playhead
+      // has eaten into that reserve, otherwise playback stalls at the end of the buffer.
+      const currentTime = audioEl.value?.currentTime || 0;
+      if (
+        !_sequentialFetchInFlight
+        && _initAppended
+        && _lastAppendedIndex + 1 < fragmentCount.value
+        && bufferedAheadSec(currentTime) < PREFETCH_LOOKAHEAD_SEC
+      ) {
+        fetchFragmentInSequence(Math.max(_lastAppendedIndex + 1, currentIndex));
       }
 
       for (const index of wanted) {

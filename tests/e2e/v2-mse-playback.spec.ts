@@ -19,6 +19,7 @@ import { join, resolve } from 'path';
 
 const PORT = Number(process.env.E2E_AUDIO_PORT || 3199);
 const BASE = `http://127.0.0.1:${PORT}`;
+const PASSWORD = 'e2e-test-password';
 // Any real library works; default to this machine's, which is what the backend uses too.
 const SOURCE_LIBRARY = process.env.E2E_MUSIC_SOURCE || process.env.MUSIC_DIR || '/workspace/music';
 
@@ -223,6 +224,19 @@ test.describe('V2 fragmented-MP4 playback', () => {
   // hook and the browser runs need more than the default 30 s.
   test.describe.configure({ timeout: 180_000 });
 
+  let authToken = null;
+
+  async function login() {
+    const res = await fetch(`${BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: PASSWORD }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.token) throw new Error(`login failed: ${res.status} ${JSON.stringify(body)}`);
+    return body.token;
+  }
+
   test.beforeAll(async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'v2-mse-'));
     const musicDir = join(tempDir, 'music');
@@ -242,6 +256,8 @@ test.describe('V2 fragmented-MP4 playback', () => {
         DATABASE_PATH: join(tempDir, 'e2e.db'),
         SCAN_ON_STARTUP: 'true',
         NORMALIZE_ON_STARTUP: 'true',
+        // Playback control (POST /api/playback/play) requires an authenticated client.
+        AUTH_PASSWORD: PASSWORD,
         LOG_LEVEL: 'warn',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -253,6 +269,7 @@ test.describe('V2 fragmented-MP4 playback', () => {
       await waitForHealth();
       trackId = await findTrackId();
       await waitForManifest(trackId);
+      authToken = await login();
     } catch (error) {
       const log = existsSync(logPath) ? readFileSync(logPath, 'utf8').slice(-3000) : '';
       throw new Error(`${error.message}\n--- server log tail ---\n${log}`);
@@ -311,5 +328,62 @@ test.describe('V2 fragmented-MP4 playback', () => {
       }
 
       expect(report.pausedAtEnd, dump).toBe(true);
+  });
+
+  // The in-page harness above proves the byte ranges decode. This one proves the component is
+  // actually wired to them: a click on a library row must end up feeding an MSE blob to the
+  // V2 player's <audio> element and keep time.
+  test('plays a library track through the V2 player UI', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'app wiring is engine-independent; one engine suffices');
+    expect(trackId, 'fixture backend unavailable').toBeTruthy();
+
+    const consoleLog = [];
+    page.on('console', (message) => consoleLog.push(`${message.type()}: ${message.text()}`));
+    page.on('pageerror', (error) => consoleLog.push(`pageerror: ${error.message}`));
+
+    await page.addInitScript(({ token }) => {
+      localStorage.setItem('muzsikapp-player-mode', 'v2');
+      localStorage.setItem('auth_token', token);
+    }, { token: authToken });
+    await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
+
+    // Rows show the tag title, not the filename, so select by structure rather than text.
+    const row = page.locator('.track-item').first();
+    await row.waitFor({ timeout: 20_000 });
+    await row.dblclick();
+
+    const progress = () => page.evaluate(async () => {
+      const audio = document.querySelector('audio');
+      if (!audio) return null;
+      const first = audio.currentTime;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 1200));
+      return {
+        src: audio.src.slice(0, 5),
+        currentTime: audio.currentTime,
+        advanced: audio.currentTime - first,
+        paused: audio.paused,
+        buffered: audio.buffered.length ? Number(audio.buffered.end(audio.buffered.length - 1).toFixed(2)) : 0,
+        error: audio.error ? audio.error.code : null,
+      };
+    });
+
+    let sample = null;
+    try {
+      await expect
+        .poll(async () => {
+          sample = await progress();
+          return sample?.src === 'blob:' && sample.advanced > 0.3;
+        }, { timeout: 25_000, message: 'V2 player never fed a blob: source that advances time' })
+        .toBe(true);
+    } finally {
+      // The app's own console is the only useful trace when this fails.
+      if (process.env.E2E_REPORT_DIR) {
+        writeFileSync(join(process.env.E2E_REPORT_DIR, 'v2-mse-ui.log'), consoleLog.join('\n'));
+      }
+    }
+
+    sample = sample ?? await progress();
+    expect(sample.error, JSON.stringify(sample)).toBeNull();
+    expect(sample.buffered).toBeGreaterThan(1);
   });
 });

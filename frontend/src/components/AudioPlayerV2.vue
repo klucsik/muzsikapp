@@ -124,6 +124,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useMseBuffer, isMseAacSupported } from '../composables/useMseBuffer.js';
 import SettingsPanel from './SettingsPanel.vue';
 import api from '../services/api';
+import websocket from '../services/websocket';
 
 // ── Logging helper ────────────────────────────────────────────────
 const log = (...args) => console.log('[V2]', ...args);
@@ -398,6 +399,54 @@ function stopTimeUpdates() {
   }
 }
 
+// ── WebSocket playback sync ──────────────────────────────────────
+// The server owns playback state and V1 reconciles from these events. V2 has to do the same,
+// otherwise a freshly selected track buffers its bytes and then sits there silently.
+
+async function ensureTrackLoaded(trackId) {
+  if (!trackId || mse.currentTrackId.value === trackId) return;
+  await loadTrackIntoMse(trackId);
+}
+
+function applyPosition(position) {
+  if (typeof position !== 'number' || !Number.isFinite(position)) return;
+  if (Math.abs(position - mse.getCurrentTime()) > 1.5) mse.seek(position);
+}
+
+async function handlePlayTrack(data) {
+  await ensureTrackLoaded(data?.trackId);
+  applyPosition(data?.position);
+  await mse.play();
+}
+
+function handleStateSync(data) {
+  const track = data?.currentTrack;
+  if (!track) return;
+  if (mse.currentTrackId.value !== track.id) {
+    ensureTrackLoaded(track.id).then(() => applyPosition(data.position));
+  } else {
+    applyPosition(data.position);
+  }
+  if (data.playbackState === 'playing') mse.play();
+  else if (data.playbackState === 'paused') mse.pause();
+}
+
+function handlePause() { mse.pause(); }
+function handleResume() { mse.play(); }
+function handleSeekEvent(data) { applyPosition(data?.position); }
+function handleStop() { mse.pause(); mse.seek(0); }
+
+const wsHandlers = [
+  ['play_track', handlePlayTrack],
+  ['state_sync', handleStateSync],
+  ['pause', handlePause],
+  ['resume', handleResume],
+  ['seek', handleSeekEvent],
+  ['stop', handleStop],
+];
+
+watch(mse.playing, (value) => { isPlaying.value = value; });
+
 // ── Lifecycle ────────────────────────────────────────────────────
 
 onMounted(async () => {
@@ -413,6 +462,12 @@ onMounted(async () => {
   startTimeUpdates();
   log('time updates started (250ms interval)');
 
+  // V1 used to be the only component calling connect(); with V1 unmounted by the mode
+  // switch, V2 has to open the socket itself or playback events never arrive.
+  websocket.connect();
+  wsHandlers.forEach(([event, handler]) => websocket.on(event, handler));
+  log('websocket playback events bound');
+
   // Set initial volume on the audio element once it's ready
   await nextTick();
   if (audioElement.value) {
@@ -424,6 +479,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  wsHandlers.forEach(([event, handler]) => websocket.off(event, handler));
   stopTimeUpdates();
   mse.shutdown();
 });
