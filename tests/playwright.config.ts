@@ -19,8 +19,17 @@ export default defineConfig({
   },
 
   projects: [
-    { name: 'chromium' },
-    // firefox and webkit browsers are cached but may not start reliably in headless container; add when needed.
+    { name: 'chromium', testMatch: ['**/*.spec.ts'] },
+    // The MSE spec is the one place engine differences matter (MediaSource + fMP4 support).
+    { name: 'webkit', use: { browserName: 'webkit' }, testMatch: /v2-mse-playback/ },
+    {
+      // Playwright's Firefox build has no AAC decoder here, so that case asserts the byte-range
+      // index is accepted and skips the timing assertions with a note.
+      name: 'firefox',
+      // Only the MSE spec is engine-aware for now; the app specs were written for Chromium.
+      testMatch: /v2-mse-playback/,
+      use: { browserName: 'firefox', launchOptions: { env: { ...process.env, CUBEB_BACKEND: 'squibb' } } },
+    },
   ],
 
   reporter: process.env.CI ? [['github'], ['list']] : [[process.env.PLAYWRIGHT_HTML === 'true' ? 'html' : 'line']],
@@ -28,7 +37,8 @@ export default defineConfig({
   webServer: {
     // Start Vite dev server. From tests/ dir, '..' resolves to muzsikapp root,
     // where the frontend project lives as a sibling directory.
-    command: 'cd .. && node ../frontend/node_modules/.bin/vite --port 5173',
+    // From tests/ the app root is '..', and frontend/ sits inside it.
+    command: 'cd .. && node ./frontend/node_modules/.bin/vite --port 5173',
     port: 5173,
     reuseExistingServer: true,
     timeout: 60_000,

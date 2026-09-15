@@ -8,3 +8,7 @@ build/
 coverage/
 tmp/
 test-*.js
+
+# Playwright artefacts
+test-results/
+playwright-report/
