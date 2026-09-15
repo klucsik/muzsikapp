@@ -7,6 +7,7 @@ import logger from '../utils/logger.js';
 import { downloadJobQueries, trackQueries, collectionQueries } from '../db/database.js';
 import { downloadAudio, fetchVideoMetadata, extractVideoId } from './ytdlpDownloader.js';
 import { findDuplicateByMetadata, mergeDuplicateTracks } from './deduplication.js';
+import { normalizeTrack } from './formatNormalizer.js';
 
 /**
  * Download Queue Manager
@@ -307,6 +308,14 @@ class DownloadQueue {
           this.broadcast('download_job_completed', { job: completedJob, track: finalTrack });
           this.broadcast('download_queue_updated', this.getQueueStatus());
           this.broadcast('track_updated', finalTrack);
+
+          // Make the new file V2-ready now rather than paying for a remux on first play.
+          const importedTrack = trackQueries.getById(finalTrackId);
+          if (importedTrack) {
+            normalizeTrack(importedTrack).catch((error) => {
+              logger.warn({ error: error.message, trackId: finalTrackId }, 'Post-download normalisation failed');
+            });
+          }
           
         } catch (error) {
           logger.error({ error, jobId: job.id }, 'Download job failed');

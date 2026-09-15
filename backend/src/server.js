@@ -19,6 +19,7 @@ import downloadsRoutes from './routes/downloads.js';
 import { scanMusicLibrary } from './scanner/fileScanner.js';
 import { initWebSocket, closeWebSocket, getClientCount } from './websocket/socketServer.js';
 import downloadQueue from './services/downloadQueue.js';
+import { normalizeLibrary } from './services/formatNormalizer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -179,6 +180,16 @@ async function start() {
     
     // File watcher disabled - library updates happen on startup scan and through download queue
     logger.info('File watcher disabled - library synced on startup and through downloads');
+
+    // Prepare tracks for the V2 player (fragmented MP4). The first run rewrites every
+    // progressive file, so it must never delay the API coming up.
+    if (config.normalizeOnStartup) {
+      setImmediate(() => {
+        normalizeLibrary()
+          .then((summary) => logger.info(summary, 'Fragment normalisation finished'))
+          .catch((error) => logger.error({ error }, 'Fragment normalisation failed'));
+      });
+    }
   } catch (error) {
     logger.error({ error }, 'Failed to start server');
     process.exit(1);

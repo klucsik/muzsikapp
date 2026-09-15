@@ -45,11 +45,14 @@ const config = {
   youtubeSearchLimit: parseInt(process.env.YOUTUBE_SEARCH_LIMIT || '10', 10),
   youtubeSearchTimeout: parseInt(process.env.YOUTUBE_SEARCH_TIMEOUT || '30000', 10), // 30 seconds
   
-  // V2 player segmentation (fragmented-mp4 remux of progressive files for MSE)
+  // V2 player: progressive files are normalised in place to fragmented MP4 for MSE
   ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
-  segmentsDir: process.env.SEGMENTS_DIR || join(__dirname, '../../data/segments'),
-  segmentDuration: parseInt(process.env.SEGMENT_DURATION || '30', 10), // seconds per segment
-  segmentTimeoutMs: parseInt(process.env.SEGMENT_TIMEOUT_MS || '120000', 10),
+  ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
+  // Milliseconds here; the mp4 muxer is handed microseconds.
+  fragmentDurationMs: parseInt(process.env.FRAGMENT_DURATION_MS || '30000', 10),
+  normalizeTimeoutMs: parseInt(process.env.NORMALIZE_TIMEOUT_MS || '120000', 10),
+  // Rewrites library files on startup scan; set false to index without touching disk
+  normalizeOnStartup: process.env.NORMALIZE_ON_STARTUP !== 'false',
 
   // External Links
   addMusicUrl: process.env.ADD_MUSIC_URL || '',

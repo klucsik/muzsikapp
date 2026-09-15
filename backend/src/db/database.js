@@ -27,6 +27,7 @@ async function runMigrations() {
   const hasYoutubeUrl = tableInfo.some(col => col.name === 'youtube_url');
   const hasYoutubeVideoId = tableInfo.some(col => col.name === 'youtube_video_id');
   const hasYoutubeThumbnail = tableInfo.some(col => col.name === 'youtube_thumbnail');
+  const hasMseMeta = tableInfo.some(col => col.name === 'mse_meta');
   
   if (!hasYoutubeUrl) {
     logger.info('Adding youtube_url column to tracks table');
@@ -42,6 +43,13 @@ async function runMigrations() {
   if (!hasYoutubeThumbnail) {
     logger.info('Adding youtube_thumbnail column to tracks table');
     db.exec('ALTER TABLE tracks ADD COLUMN youtube_thumbnail TEXT');
+  }
+
+  if (!hasMseMeta) {
+    // Fragment index for the V2 (MediaSource) player: fingerprint, media type and byte
+    // ranges of each fragment. Kept per track so startup only re-scans changed files.
+    logger.info('Adding mse_meta column to tracks table');
+    db.exec('ALTER TABLE tracks ADD COLUMN mse_meta TEXT');
   }
   
   // Check if download_jobs table exists

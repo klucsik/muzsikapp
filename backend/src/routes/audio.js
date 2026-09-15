@@ -4,7 +4,7 @@ import { join } from 'path';
 import { trackQueries } from '../db/database.js';
 import config from '../config/config.js';
 import logger from '../utils/logger.js';
-import { getManifest, getInitFile, getSegmentFile } from '../services/segmenter.js';
+import { buildManifest, getPlayMeta } from '../services/formatNormalizer.js';
 import { getMimeType } from '../utils/audioFormat.js';
 
 const router = express.Router();
@@ -128,37 +128,14 @@ router.get('/:trackId', (req, res) => {
 });
 
 /**
- * V2 player (MSE) endpoints.
+ * V2 player (MSE) endpoint.
  *
- * Progressive MP4 cannot be fed to a SourceBuffer, so the backend remuxes it into
- * fragmented segments on first request and caches the result. A track that is not
- * segmentable answers 415 with `fallback: 'v1'` so the client can switch players.
+ * Tracks are stored as fragmented MP4 (normalised in place on scan), so the client only
+ * needs to know where each fragment starts: it fetches them by byte range from the ordinary
+ * audio route above. A track that cannot be fragmented answers 415 with `fallback: 'v1'`
+ * so the player can switch instead of failing.
  */
 
-const SEGMENT_STATUS = {
-  UNSUPPORTED_FORMAT: 415,
-  SOURCE_MISSING: 404,
-  NOT_SEGMENTED: 404,
-  SEGMENT_OUT_OF_RANGE: 404,
-};
-
-function segmentError(res, error, trackId) {
-  const status = SEGMENT_STATUS[error.code] || 500;
-  logger[status === 500 ? 'error' : 'warn'](
-    { trackId, code: error.code, message: error.message },
-    'Segment request failed',
-  );
-  res.status(status).json({
-    error: error.code || 'SEGMENT_FAILED',
-    message: error.message,
-    ...(error.code === 'UNSUPPORTED_FORMAT' ? { fallback: 'v1' } : {}),
-  });
-}
-
-/**
- * GET /api/audio/:trackId/manifest
- * Triggers conversion when needed. This is the V2 "switchover" call.
- */
 router.get('/:trackId/manifest', async (req, res) => {
   const track = trackQueries.getById(req.params.trackId);
   if (!track) {
@@ -166,43 +143,20 @@ router.get('/:trackId/manifest', async (req, res) => {
   }
 
   try {
-    const manifest = await getManifest(track, { force: req.query.force === '1' });
+    const meta = await getPlayMeta(track);
     res.setHeader('Cache-Control', 'no-cache');
-    res.json(manifest);
+    res.json(buildManifest(track, meta));
   } catch (error) {
-    segmentError(res, error, track.id);
-  }
-});
-
-/**
- * GET /api/audio/:trackId/init   — the ftyp+moov init segment
- */
-router.get('/:trackId/init', async (req, res) => {
-  try {
-    const { manifest, path } = await getInitFile(req.params.trackId);
-    res.setHeader('Content-Type', manifest.mime);
-    res.sendFile(path, { cacheControl: true, maxAge: 31536000000, immutable: true }, (err) => {
-      if (err && !res.headersSent) segmentError(res, err, req.params.trackId);
+    const status = error.code === 'UNSUPPORTED_FORMAT' ? 415 : error.code === 'ENOENT' ? 404 : 500;
+    logger[status === 500 ? 'error' : 'warn'](
+      { trackId: track.id, code: error.code, message: error.message },
+      'Manifest request failed',
+    );
+    res.status(status).json({
+      error: error.code || 'MANIFEST_FAILED',
+      message: error.message,
+      fallback: 'v1',
     });
-  } catch (error) {
-    segmentError(res, error, req.params.trackId);
-  }
-});
-
-/**
- * GET /api/audio/:trackId/segment/:index
- */
-router.get('/:trackId/segment/:index', async (req, res) => {
-  try {
-    const { manifest, segment, path } = await getSegmentFile(req.params.trackId, req.params.index);
-    res.setHeader('Content-Type', manifest.mime);
-    res.setHeader('X-Track-Duration', String(manifest.duration));
-    res.setHeader('X-Range', `${segment.start}-${segment.end}`);
-    res.sendFile(path, { cacheControl: true, maxAge: 31536000000, immutable: true }, (err) => {
-      if (err && !res.headersSent) segmentError(res, err, req.params.trackId);
-    });
-  } catch (error) {
-    segmentError(res, error, req.params.trackId);
   }
 });
 
