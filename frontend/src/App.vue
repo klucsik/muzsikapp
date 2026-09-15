@@ -58,6 +58,7 @@
             :has-previous="hasPrevious"
             @next-track="playNextTrack"
             @previous-track="playPreviousTrack"
+            @fallback-v1="setPlayerMode('v1')"
           />
         </div>
 

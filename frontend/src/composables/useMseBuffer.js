@@ -1,59 +1,60 @@
 /**
- * useMseBuffer — MediaSource Extensions (MSE) audio buffer manager with caching and prefetching.
- * 
- * Fetches 30s M4A/AAC chunks via HTTP Range requests, manages an in-memory cache,
- * and uses prediction logic to prefetch upcoming segments for seamless playback.
+ * useMseBuffer — MediaSource (V2) playback for fragmented-MP4 tracks.
+ *
+ * The backend normalises every m4a to a fragmented container and hands back a manifest of
+ * byte ranges (`GET /audio/:id/manifest` — the audio router is not under `/api`): an init segment plus one entry per fragment.
+ * Fragments are fetched with Range requests against the ordinary audio URL, so caching works
+ * on immutable byte spans instead of arbitrary slices that no decoder can parse.
  */
 
 import { ref, computed } from 'vue';
 import { ChunkCache } from '../services/chunkCache.js';
 import { predictNextChunks, CHUNK_DURATION } from '../services/prefetchPredictor.js';
-import { telemetry } from '../composables/useTelemetry.js';
+import { telemetry } from './useTelemetry.js';
 
 // ─── Logging ─────────────────────────────────────────────────────────
-function log(...args) { console.log('[MSE]', ...args); }
-function warn(...args) { console.warn('[MSE]', ...args); }
-function err(...args) { console.error('[MSE]', ...args); }
+const log = (...args) => console.log('[MSE]', ...args);
+const warn = (...args) => console.warn('[MSE]', ...args);
+const err = (...args) => console.error('[MSE]', ...args);
 
-// ─── Constants ───────────────────────────────────────────────────────
-
-const AAC_MIME_TYPE = 'audio/mp4; codecs="mp4a.40.2"';
+// Fallback mime used only for the capability probe; real playback uses manifest.mime.
+const DEFAULT_MIME = 'audio/mp4; codecs="mp4a.40.2"';
 const INIT_RETRY_DELAY = 150;
+const PREFETCH_INTERVAL_MS = 5000;
+const MAX_APPEND_RETRIES = 2;
 
-// ─── Helpers ─────────────────────────────────────────────────────────
-
-function isMseAacSupported() {
-  return typeof MediaSource !== 'undefined' &&
-    MediaSource.isTypeSupported(AAC_MIME_TYPE);
+export function isMseSupported(mimeType = DEFAULT_MIME) {
+  return typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(mimeType);
 }
 
-function calculateChunkByteRange(chunkIndex, totalChunks, fileSize) {
-  const bytesPerChunk = Math.floor(fileSize / totalChunks);
-  const start = chunkIndex * bytesPerChunk;
-  const end = chunkIndex === totalChunks - 1
-    ? fileSize - 1
-    : start + bytesPerChunk - 1;
-  return { start, end: Math.min(end, fileSize - 1) };
-}
+export const isMseAacSupported = () => isMseSupported();
 
-async function fetchChunk(baseUrl, startByte, endByte, signal) {
-  const response = await fetch(baseUrl, {
-    headers: { 'Range': `bytes=${startByte}-${endByte}` },
-    signal,
-  });
-  if (response.status === 416) throw new Error('Range not satisfiable');
-  if (!response.ok || response.status !== 206) throw new Error(`Fetch failed: ${response.status}`);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchRange(url, startByte, endByte, signal) {
+  const response = await fetch(url, { headers: { Range: `bytes=${startByte}-${endByte}` }, signal });
+  if (response.status === 416) throw new Error(`Range not satisfiable: ${startByte}-${endByte}`);
+  if (!response.ok && response.status !== 206) throw new Error(`Fetch failed: ${response.status}`);
   return response.arrayBuffer();
+}
+
+/** Init segment + fragment table for a track. `fallback: 'v1'` means "use the other player". */
+async function fetchManifest(audioBaseUrl, signal) {
+  const response = await fetch(`${audioBaseUrl}/manifest`, { signal });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(body.message || `Manifest request failed: ${response.status}`);
+    error.code = body.error;
+    error.fallback = body.fallback;
+    throw error;
+  }
+  return body;
 }
 
 // ─── Composable ──────────────────────────────────────────────────────
 
-export { isMseAacSupported };
-
 export function useMseBuffer() {
   const cache = new ChunkCache(50 * 1024 * 1024); // 50MB default budget
-
-  // ── Internal State ─────────────────────────────────────────────
 
   /** @type {{ value: HTMLAudioElement | null }} */
   const audioEl = ref(null);
@@ -64,64 +65,86 @@ export function useMseBuffer() {
 
   const currentTrackId = ref(null);
   const trackDuration = ref(0);
-  const fileSize = ref(0);
-  const playlist = ref([]); 
+  const fragments = ref([]);
+  const manifestMime = ref(DEFAULT_MIME);
+  const playlist = ref([]);
   const loopRegion = ref(null); // { startSec, endSec }
   const repeatMode = ref('none');
 
   const playing = ref(false);
   const bufferedRanges = ref(null);
   const error = ref(null);
-  const mseSupported = ref(isMseAacSupported());
+  const mseSupported = ref(isMseSupported());
+  const needsFallback = ref(false);
   const loadProgress = ref(0);
 
-  // Reactive cache stats for telemetry panel
   const cacheSize = computed(() => cache.totalSize);
   const pendingCount = computed(() => {
-    if (!cache.pendingIndices) return 0;
     let count = 0;
     for (const key of cache.pendingIndices) {
-      if (typeof key === 'number') count++;
+      if (typeof key === 'string' || typeof key === 'number') count += 1;
     }
     return count;
   });
 
-  // Speed limiter state
-  let _speedCapBytesPerSec = 0; // 0 = unlimited 
-
-  let _fetchedChunksCount = 0;
+  let _speedCapBytesPerSec = 0; // 0 = unlimited
   let _abortController = null;
   let _sequentialFetchInFlight = false;
   let _isShuttingDown = false;
   let _prefetchInterval = null;
-  let _audioBaseUrl = '';
   let _stallDetectionInterval = null;
+  let _audioBaseUrl = '';
+  let _initEnd = 0;
+  let _initAppended = false;
+  let _lastAppendedIndex = -1;
+  let _appendQueue = []; // fragment indices waiting for the SourceBuffer to free up
+  let _appendRetries = 0;
 
-  // ── Core Lifecycle ─────────────────────────────────────────────
+  // ── Fragment geometry ──────────────────────────────────────────
 
-  function initMediaSource(el) {
-    log('initMediaSource — el:', !!el, 'type:', el?.tagName);
+  const fragmentCount = computed(() => fragments.value.length);
+
+  /** Real fragment boundaries come from the manifest, not from a fixed chunk length. */
+  function fragmentIndexForTime(seconds) {
+    const list = fragments.value;
+    if (!list.length) return 0;
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const start = list[i].start ?? 0;
+      if (seconds >= start - 0.001) return i;
+    }
+    return 0;
+  }
+
+  /** Predictive prefetch assumes fixed-length chunks; only trust it when that holds. */
+  function predictorApplies() {
+    const count = fragments.value.length;
+    if (!count || !trackDuration.value) return false;
+    const actual = trackDuration.value / count;
+    return Math.abs(actual - CHUNK_DURATION) / CHUNK_DURATION < 0.25;
+  }
+
+  // ── Core lifecycle ─────────────────────────────────────────────
+
+  function initMediaSource(el, mimeType = DEFAULT_MIME) {
     if (_isShuttingDown) { warn('initMediaSource blocked by shutdown'); return; }
-    shutdown(true);
 
     const ms = new MediaSource();
     mediaSource.value = ms;
-    log('created MediaSource, readyState:', ms.readyState);
+    manifestMime.value = mimeType;
     el.src = URL.createObjectURL(ms);
-    log('set audio element src to blob URL');
 
-    ms.addEventListener('sourceopen', async () => {
-      log('MediaSource sourceopen event — readyState:', ms.readyState);
+    ms.addEventListener('sourceopen', () => {
       try {
-        const sb = ms.addSourceBuffer(AAC_MIME_TYPE);
+        const sb = ms.addSourceBuffer(mimeType);
         sourceBuffer.value = sb;
-        log('SourceBuffer created for MIME:', AAC_MIME_TYPE);
-
-        sb.addEventListener('updateend', () => {
-          if (!_isShuttingDown && currentTrackId.value) {
-            updateBufferedRanges();
-            _onSourceBufferUpdateEnd();
-          }
+        log('SourceBuffer created for MIME:', mimeType, 'mode:', sb.mode);
+        // Default 'segments' mode is required: it honours each fragment's own timestamps, so
+        // appending a fragment after a seek lands at the right media time. 'sequence' would
+        // glue it to the end of the buffer instead.
+        sb.addEventListener('updateend', onSourceBufferUpdateEnd);
+        sb.addEventListener('error', () => {
+          err('SourceBuffer error (readyState:', sb.updating ? 'updating' : 'idle', ')');
+          telemetry.recordPlaybackError?.('sourcebuffer-error');
         });
       } catch (e) {
         err('failed to add SourceBuffer:', e.message || e);
@@ -136,16 +159,14 @@ export function useMseBuffer() {
     if (_stallDetectionInterval) clearInterval(_stallDetectionInterval);
     _stallDetectionInterval = setInterval(() => {
       const el = audioEl.value;
-      if (playing.value && el) {
-        const buffered = el.buffered;
-        if (buffered.length > 0) {
-          const lastBufferedEnd = buffered.end(buffered.length - 1);
-          if (el.currentTime >= lastBufferedEnd - 0.5 && el.currentTime < el.duration - 0.1) {
-             telemetry.recordStallStart();
-          } else if (el.currentTime < lastBufferedEnd - 0.2) {
-             telemetry.recordStallEnd();
-          }
-        }
+      if (!playing.value || !el) return;
+      const buffered = el.buffered;
+      if (!buffered.length) return;
+      const lastBufferedEnd = buffered.end(buffered.length - 1);
+      if (el.currentTime >= lastBufferedEnd - 0.5 && el.currentTime < (el.duration || Infinity) - 0.1) {
+        telemetry.recordStallStart();
+      } else if (el.currentTime < lastBufferedEnd - 0.2) {
+        telemetry.recordStallEnd();
       }
     }, 1000);
   }
@@ -153,235 +174,357 @@ export function useMseBuffer() {
   function shutdown(silent = false) {
     if (!silent) log('shutdown called');
     if (_stallDetectionInterval) { clearInterval(_stallDetectionInterval); _stallDetectionInterval = null; }
-    if (_isShuttingDown) return;
+    const alreadyDown = _isShuttingDown;
     _isShuttingDown = true;
-    
-    if (_prefetchInterval) clearInterval(_prefetchInterval);
-    if (_abortController) _abortController.abort();
 
-    sourceBuffer.value = null;
-    if (mediaSource.value && mediaSource.value.readyState === 'open') {
-      try { mediaSource.value.endOfStream(); } catch (_) {}
+    if (_prefetchInterval) { clearInterval(_prefetchInterval); _prefetchInterval = null; }
+    if (_abortController) { _abortController.abort(); _abortController = null; }
+
+    const sb = sourceBuffer.value;
+    if (sb && mediaSource.value) {
+      sb.removeEventListener('updateend', onSourceBufferUpdateEnd);
+      try {
+        // endOfStream() throws while an update is in flight; the element is being torn down
+        // anyway, so ignore it rather than log spurious errors on every track change.
+        if (!sb.updating && mediaSource.value.readyState === 'open') mediaSource.value.endOfStream();
+      } catch (_) { /* tearing down */ }
     }
-    if (audioEl.value && audioEl.value.src.startsWith('blob:')) {
-      URL.revokeObjectURL(audioEl.value.src);
-      audioEl.value.removeAttribute('src');
-      audioEl.value.load();
+
+    const el = audioEl.value;
+    if (el?.src?.startsWith('blob:')) {
+      URL.revokeObjectURL(el.src);
+      el.removeAttribute('src');
+      el.load();
     }
 
     mediaSource.value = null;
-    audioEl.value = null;
+    sourceBuffer.value = null;
+    if (!alreadyDown) audioEl.value = null;
     currentTrackId.value = null;
     trackDuration.value = 0;
-    fileSize.value = 0;
-    playlist.value = [];
-    loopRegion.value = null;
-    repeatMode.value = 'none';
+    fragments.value = [];
+    _initEnd = 0;
+    _initAppended = false;
+    _lastAppendedIndex = -1;
+    _appendQueue = [];
     playing.value = false;
     error.value = null;
+    needsFallback.value = false;
     bufferedRanges.value = null;
+    loadProgress.value = 0;
     _isShuttingDown = false;
   }
 
   async function loadTrack(trackId, audioBaseUrl, audioElRef, duration) {
-    log('loadTrack:', trackId, 'baseUrl:', audioBaseUrl, 'el:', !!audioElRef, 'duration:', duration);
+    log('loadTrack:', trackId, audioBaseUrl);
     shutdown();
+
     currentTrackId.value = trackId;
     _audioBaseUrl = audioBaseUrl;
     error.value = null;
-
-    // Store the audio element reference for playback controls
+    needsFallback.value = false;
     audioEl.value = audioElRef;
-    log('stored audioEl ref, now:', !!audioEl.value);
+    _abortController = new AbortController(); // fresh per track; shutdown() aborts the old one
 
-    // Fresh abort controller per track — shutdown() aborts the previous one and
-    // it is never reused, otherwise every chunk fetch would bail out silently.
-    _abortController = new AbortController();
-
-    initMediaSource(audioElRef);
-    log('waiting for MediaSource sourceopen...');
-    await waitForSourceOpen();
-    log('sourceopen ready, sourceBuffer exists?', !!sourceBuffer.value);
-
-    if (!sourceBuffer.value || error.value) {
-      err('loadTrack aborted: sourceBuffer=', !!sourceBuffer.value, 'error=', error.value?.message);
+    const signal = _abortController.signal;
+    let manifest;
+    try {
+      manifest = await fetchManifest(audioBaseUrl, signal);
+    } catch (e) {
+      if (signal.aborted) return;
+      if (e.fallback === 'v1' || e.code === 'UNSUPPORTED_FORMAT') {
+        warn('track needs the V1 player:', e.message);
+        needsFallback.value = true;
+        return;
+      }
+      err('manifest failed:', e.message || e);
+      error.value = e;
       return;
     }
 
-    try {
-      log('fetching HEAD for file size:', audioBaseUrl);
-      const headResp = await fetch(audioBaseUrl, { method: 'HEAD' });
-      if (!headResp.ok) err(`HEAD request failed with status ${headResp.status}`);
-      fileSize.value = parseInt(headResp.headers.get('Content-Length') || '0', 10);
-      trackDuration.value = duration || parseFloat(headResp.headers.get('X-Track-Duration')) || 0;
-      log('fileSize:', fileSize.value, 'trackDuration:', trackDuration.value);
+    fragments.value = manifest.fragments || [];
+    trackDuration.value = manifest.durationSec || duration || 0;
+    _initEnd = manifest.initEnd || 0;
 
-      _startPrefetching();
-      log('prefetching started, fetching first chunk...');
-      await _fetchNextChunkInSequence(0);
+    if (!isMseSupported(manifest.mime)) {
+      warn('browser cannot decode', manifest.mime, '— falling back to V1');
+      needsFallback.value = true;
+      return;
+    }
+
+    initMediaSource(audioElRef, manifest.mime);
+    await waitForSourceOpen();
+
+    if (!sourceBuffer.value || error.value) {
+      err('loadTrack aborted: no SourceBuffer');
+      if (!error.value) error.value = new Error('MediaSource unavailable');
+      return;
+    }
+
+    if (trackDuration.value && mediaSource.value.duration !== trackDuration.value) {
+      try { mediaSource.value.duration = trackDuration.value; } catch (_) { /* set on append */ }
+    }
+
+    await loadInitSegment();
+    if (_isShuttingDown || currentTrackId.value !== trackId) return;
+
+    startPrefetching();
+    const startIndex = fragmentIndexForTime(audioElRef?.currentTime || 0);
+    _lastAppendedIndex = startIndex - 1;
+    await fetchFragmentInSequence(startIndex);
+  }
+
+  /** ftyp+moov: without this first append every following fragment is undecodable. */
+  async function loadInitSegment() {
+    if (_initAppended || !_initEnd) return;
+    const key = `${currentTrackId.value}-init`;
+    try {
+      let buffer = cache.get(key);
+      if (!buffer) {
+        buffer = await fetchRange(_audioBaseUrl, 0, _initEnd - 1, _abortController?.signal);
+        cache.put(key, buffer);
+      }
+      await appendBuffer(buffer, { init: true });
+      _initAppended = true;
+      log('init segment appended:', buffer.byteLength, 'bytes');
     } catch (e) {
-      err('loadTrack failed:', e.message || e);
+      if (e?.name === 'AbortError') return;
+      err('init segment failed:', e.message || e);
       error.value = e;
     }
   }
 
   function waitForSourceOpen() {
     return new Promise((resolve, reject) => {
+      const ms = mediaSource.value;
+      if (!ms) return reject(new Error('No MediaSource'));
+      if (ms.readyState === 'open') return resolve();
+
       let timerId = null;
       const onOpen = () => {
-        log('waitForSourceOpen: sourceopen event received');
-        if (mediaSource.value?.readyState === 'open') {
-          mediaSource.value.removeEventListener('sourceopen', onOpen);
-          clearTimeout(timerId); // clear timeout — we succeeded
-          resolve();
-        }
+        if (mediaSource.value?.readyState !== 'open') return;
+        mediaSource.value.removeEventListener('sourceopen', onOpen);
+        clearTimeout(timerId);
+        resolve();
       };
-      mediaSource.value?.addEventListener('sourceopen', onOpen);
+
+      ms.addEventListener('sourceopen', onOpen);
       timerId = setTimeout(() => {
-        err('MediaSource sourceopen timed out after 5s, readyState:', mediaSource.value?.readyState);
+        err('MediaSource sourceopen timed out, readyState:', ms.readyState);
         reject(new Error('MediaSource timeout'));
       }, 5000);
     });
   }
 
-  // ── Chunk Pipeline (Sequential for playback) ─────────────────────
+  // ── Fragment pipeline ──────────────────────────────────────────
 
-  async function _fetchNextChunkInSequence(index) {
-    if (_isShuttingDown) { warn(`chunk ${index}: skipped (shutting down)`); return; }
-    if (!currentTrackId.value) { warn(`chunk ${index}: skipped (no current track)`); return; }
-    const totalChunks = Math.ceil(trackDuration.value / CHUNK_DURATION);
-    if (index >= totalChunks) { log(`chunk ${index} >= totalChunks ${totalChunks}, stopping`); return; }
-    if (_abortController?.signal.aborted) { warn(`chunk ${index}: skipped (aborted)`); return; }
+  async function fetchFragmentInSequence(index) {
+    if (_isShuttingDown || !currentTrackId.value) return;
+    if (index >= fragmentCount.value) return;
 
-    const cacheKey = `${currentTrackId.value}-${index}`;
-    const cachedBuffer = cache.get(cacheKey);
-    if (cachedBuffer) {
-      log(`chunk ${index}: HIT in cache (${cachedBuffer.byteLength} bytes)`);
-      await _appendToSourceBuffer(index, cachedBuffer);
-      return;
+    const trackAtStart = currentTrackId.value;
+    const cacheKey = `${trackAtStart}-${index}`;
+
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      await appendBuffer(cached, { index });
+      return nextFragment(index);
     }
 
+    if (_abortController?.signal.aborted) return;
+
     try {
-      const range = calculateChunkByteRange(index, totalChunks, fileSize.value);
-      log(`chunk ${index}: fetching bytes=${range.start}-${range.end}`);
-      cache.markPending(cacheKey); 
-      const startTime = performance.now();
+      const fragment = fragments.value[index];
       _sequentialFetchInFlight = true;
+      cache.markPending(cacheKey);
+      const startedAt = performance.now();
+      log(`fragment ${index}: bytes=${fragment.offset}-${fragment.offset + fragment.size - 1}`);
+
       let buffer;
       try {
-        buffer = await fetchChunk(_audioBaseUrl, range.start, range.end, _abortController?.signal);
+        buffer = await fetchRange(_audioBaseUrl, fragment.offset, fragment.offset + fragment.size - 1, _abortController?.signal);
       } finally {
         _sequentialFetchInFlight = false;
       }
-      const elapsedSec = (performance.now() - startTime) / 1000;
+
+      if (currentTrackId.value !== trackAtStart) return; // track changed mid-fetch
+
+      const elapsedSec = Math.max((performance.now() - startedAt) / 1000, 0.001);
+      await respectSpeedCap(buffer.byteLength, startedAt);
 
       telemetry.recordDownload(buffer.byteLength, elapsedSec);
       cache.put(cacheKey, buffer);
       telemetry.updateMemoryUsage(cache.totalSize);
-      log(`chunk ${index}: fetched ${buffer.byteLength} bytes in ${elapsedSec.toFixed(2)}s`);
+      log(`fragment ${index}: ${buffer.byteLength} bytes in ${elapsedSec.toFixed(2)}s`);
 
-      await _appendToSourceBuffer(index, buffer);
+      await appendBuffer(buffer, { index });
+      return nextFragment(index);
     } catch (e) {
       _sequentialFetchInFlight = false;
-      if (e?.name === 'AbortError') { log(`chunk ${index}: fetch aborted`); return; }
-      err(`chunk ${index} fetch error:`, e.message || e);
-      setTimeout(() => _fetchNextChunkInSequence(index), INIT_RETRY_DELAY);
+      cache.unmarkPending?.(cacheKey);
+      if (e?.name === 'AbortError') return;
+      err(`fragment ${index} fetch error:`, e.message || e);
+      telemetry.recordDownloadError?.();
+      await sleep(INIT_RETRY_DELAY);
+      return fetchFragmentInSequence(index);
     }
   }
 
-  async function _appendToSourceBuffer(index, buffer) {
-    if (!sourceBuffer.value) { warn(`chunk ${index}: no sourceBuffer`); return; }
-
-    if (!sourceBuffer.value.updating) {
-      const currentIdx = Math.floor((audioEl.value?.currentTime || 0) / CHUNK_DURATION);
-      if (index < currentIdx) { log(`chunk ${index}: skipped (behind playhead at chunk ${currentIdx})`); return; }
-
-      try {
-        log(`chunk ${index}: appending to SourceBuffer (${buffer.byteLength} bytes)`);
-        sourceBuffer.value.appendBuffer(buffer);
-      } catch (e) {
-        err('append error:', e.message || e);
-        cache.remove(`${currentTrackId.value}-${index}`);
-      }
-    } else if (sourceBuffer.value?.updating) {
-      log(`chunk ${index}: queued (SourceBuffer updating)`);
-      sourceBuffer.value._pendingChunk = index;
-    }
+  function nextFragment(previousIndex) {
+    const playheadIndex = fragmentIndexForTime(audioEl.value?.currentTime || 0);
+    const next = Math.max(previousIndex + 1, playheadIndex);
+    if (next < previousIndex + 1 || next >= fragmentCount.value) return undefined;
+    return fetchFragmentInSequence(next);
   }
 
-  function _onSourceBufferUpdateEnd() {
-    if (_isShuttingDown || !currentTrackId.value) return;
+  /** Respects the user's bandwidth cap by padding out the download time. */
+  async function respectSpeedCap(byteLength, startedAt) {
+    if (!_speedCapBytesPerSec) return;
+    const minimumMs = (byteLength / _speedCapBytesPerSec) * 1000 - (performance.now() - startedAt);
+    if (minimumMs > 0) await sleep(minimumMs);
+  }
+
+  /**
+   * Append with a queue: SourceBuffer rejects appendBuffer while updating, and MSE also
+   * rejects appends that would exceed the byte quota until old audio is removed.
+   */
+  function appendBuffer(buffer, { index = null, init = false } = {}) {
+    return new Promise((resolve) => {
+      const sb = sourceBuffer.value;
+      if (!sb) { warn('append: no SourceBuffer'); resolve(); return; }
+
+      _appendQueue.push({ buffer, index, init, resolve });
+      drainAppendQueue();
+    });
+  }
+
+  function drainAppendQueue() {
     const sb = sourceBuffer.value;
-    
-    if (sb && sb._pendingChunk !== undefined) {
-      const idx = sb._pendingChunk;
-      delete sb._pendingChunk;
-      _fetchNextChunkInSequence(idx);
-      return;
-    }
+    if (!sb || !_appendQueue.length) return;
 
-    const playheadSec = audioEl.value?.currentTime || 0;
-    const nextIdx = Math.floor(playheadSec / CHUNK_DURATION) + 1;
-    _fetchNextChunkInSequence(nextIdx);
+    // Keep the queue short: stale fragments behind the playhead are worthless.
+    while (_appendQueue.length) {
+      const head = _appendQueue[0];
+      if (head.index !== null && head.index <= _lastAppendedIndex) {
+        _appendQueue.shift();
+        head.resolve();
+        continue;
+      }
+      if (!sb.updating) {
+        const item = _appendQueue.shift();
+        try {
+          sb.appendBuffer(item.buffer);
+          if (item.index !== null) _lastAppendedIndex = Math.max(_lastAppendedIndex, item.index);
+          item.resolve();
+        } catch (e) {
+          _appendRetries += 1;
+          if (isQuotaError(e) && _appendRetries <= MAX_APPEND_RETRIES && evictBufferedAudio()) {
+            // Put it back and let the removal's updateend retry it; resolving now would
+            // let the pipeline run on and leave a permanent hole in buffered audio.
+            _appendQueue.unshift(item);
+            return;
+          }
+          err('append failed:', e.message || e);
+          telemetry.recordDownloadError?.();
+          cache.remove(`${currentTrackId.value}-${item.index}`);
+          item.resolve();
+        }
+        return; // wait for updateend
+      }
+      return; // SourceBuffer busy; updateend will drain again
+    }
   }
 
-  // ── Prefetching (Background) ─────────────────────────────────────
+  function isQuotaError(e) {
+    return e?.name === 'QuotaExceededError' || e?.code === 22;
+  }
 
-  function _startPrefetching() {
+  /** Drop buffered audio well behind the playhead so appends can keep going. */
+  function evictBufferedAudio() {
+    const sb = sourceBuffer.value;
+    const el = audioEl.value;
+    if (!sb || !el || sb.updating) return false;
+
+    const keepFrom = Math.max(0, (el.currentTime || 0) - 30);
+    if (keepFrom <= 0 || !el.buffered.length) return false;
+    try {
+      sb.remove(0, keepFrom);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function onSourceBufferUpdateEnd() {
+    if (_isShuttingDown || !currentTrackId.value) return;
+    _appendRetries = 0;
+    updateBufferedRanges();
+    drainAppendQueue();
+  }
+
+  // ── Prefetching (background) ───────────────────────────────────
+
+  function startPrefetching() {
     if (_prefetchInterval) clearInterval(_prefetchInterval);
-    _prefetchInterval = setInterval(async () => {
-      // Skip only while a sequential (playback-critical) fetch is in flight —
-      // NOT while playing: prefetching exists precisely for the playing case.
+    _prefetchInterval = setInterval(() => {
+      // Skip only while a playback-critical fetch is running — prefetching matters most
+      // *while* playing, so do not gate on `playing`.
       if (!currentTrackId.value || _sequentialFetchInFlight) return;
 
-      const predicted = predictNextChunks({
-        currentTrackIndex: 0, 
-        currentTimeInSeconds: audioEl.value?.currentTime || 0,
-        playlist: playlist.value,
-      }, {
-        loopRegion: loopRegion.value,
-        repeatMode: repeatMode.value
-      });
+      const currentIndex = fragmentIndexForTime(audioEl.value?.currentTime || 0);
+      const wanted = new Set();
 
-      for (const { trackIndex, chunkIndex } of predicted) {
-        if (trackIndex === 0 && !cache.has(`${currentTrackId.value}-${chunkIndex}`)) {
-          _prefetchChunk(currentTrackId.value, chunkIndex);
+      if (predictorApplies()) {
+        for (const prediction of predictNextChunks(
+          { currentTrackIndex: 0, currentTimeInSeconds: audioEl.value?.currentTime || 0, playlist: playlist.value },
+          { loopRegion: loopRegion.value, repeatMode: repeatMode.value },
+        )) {
+          if (prediction.trackIndex === 0) wanted.add(prediction.chunkIndex);
         }
       }
-    }, 5000);
+
+      // Always keep the next couple of fragments warm, predictor or not.
+      for (let offset = 1; offset <= 2; offset += 1) {
+        if (currentIndex + offset < fragmentCount.value) wanted.add(currentIndex + offset);
+      }
+
+      for (const index of wanted) {
+        const key = `${currentTrackId.value}-${index}`;
+        if (!cache.has(key)) prefetchFragment(index);
+      }
+    }, PREFETCH_INTERVAL_MS);
   }
 
-  async function _prefetchChunk(targetTrackId, chunkIdx) {
-    if (cache.has(`${targetTrackId}-${chunkIdx}`)) return;
-    try {
-      const range = calculateChunkByteRange(chunkIdx, Math.ceil(trackDuration.value / CHUNK_DURATION), fileSize.value);
-      cache.markPending(`${targetTrackId}-${chunkIdx}`);
-      const startTime = performance.now();
-      const buffer = await fetchChunk(_audioBaseUrl, range.start, range.end);
-      const endTime = performance.now();
+  async function prefetchFragment(index) {
+    if (index < 0 || index >= fragmentCount.value) return;
+    const trackAtStart = currentTrackId.value;
+    const key = `${trackAtStart}-${index}`;
+    if (cache.has(key)) return;
 
-      telemetry.recordDownload(buffer.byteLength, (endTime - startTime) / 1000);
-      cache.put(`${targetTrackId}-${chunkIdx}`, buffer);
-      telemetry.updateMemoryUsage(cache.totalSize);
-    } catch (err) {
-      console.warn(`[Prefetch] Chunk ${chunkIdx} failed:`, err);
+    cache.markPending(key);
+    try {
+      const fragment = fragments.value[index];
+      const startedAt = performance.now();
+      const buffer = await fetchRange(_audioBaseUrl, fragment.offset, fragment.offset + fragment.size - 1);
+      telemetry.recordDownload(buffer.byteLength, Math.max((performance.now() - startedAt) / 1000, 0.001));
+      if (currentTrackId.value === trackAtStart) {
+        cache.put(key, buffer);
+        telemetry.updateMemoryUsage(cache.totalSize);
+      }
+    } catch (e) {
+      if (e?.name !== 'AbortError') warn(`prefetch ${index} failed:`, e.message || e);
     } finally {
-      cache.unmarkPending(`${targetTrackId}-${chunkIdx}`);
+      cache.unmarkPending?.(key);
     }
   }
 
-  function isBuffering() { return !audioEl.value?.paused; }
-
-  // ── Playback Control ─────────────────────────────────────────────
+  // ── Playback control ───────────────────────────────────────────
 
   async function play() {
-    log('play called, audioEl:', !!audioEl.value);
     if (!audioEl.value) { warn('play: no audio element'); return; }
     try {
-      log('calling audio.play()...');
       await audioEl.value.play();
       playing.value = true;
-      log('playing!');
     } catch (e) {
       err('play failed:', e.message || e);
       error.value = e;
@@ -389,71 +532,97 @@ export function useMseBuffer() {
   }
 
   function pause() {
-    log('pause called');
     audioEl.value?.pause();
     playing.value = false;
   }
 
   async function togglePlayPause() {
-    if (playing.value) { log('toggle: pausing'); pause(); } else { log('toggle: playing'); await play(); }
+    if (playing.value) pause();
+    else await play();
   }
 
+  /** Seeking may land on a fragment we never fetched, so kick the pipeline from there. */
   function seek(seconds) {
-    log('seek to:', seconds);
-    audioEl.value && (audioEl.value.currentTime = seconds);
+    const el = audioEl.value;
+    if (!el) return;
+    el.currentTime = seconds;
+    const index = fragmentIndexForTime(seconds);
+    if (index > _lastAppendedIndex || !isTimeBuffered(seconds)) {
+      _lastAppendedIndex = Math.min(_lastAppendedIndex, index - 1);
+      fetchFragmentInSequence(index);
+    }
   }
+
+  function isTimeBuffered(seconds) {
+    const buffered = audioEl.value?.buffered;
+    if (!buffered) return false;
+    for (let i = 0; i < buffered.length; i += 1) {
+      if (seconds >= buffered.start(i) && seconds <= buffered.end(i)) return true;
+    }
+    return false;
+  }
+
   function setVolume(vol) {
-    log('set volume:', vol, 'audioEl:', !!audioEl.value);
-    audioEl.value && (audioEl.value.volume = vol);
+    if (audioEl.value) audioEl.value.volume = vol;
   }
+
   function getCurrentTime() { return audioEl.value?.currentTime || 0; }
 
-  function updateBufferedRanges() { bufferedRanges.value = audioEl.value?.buffered ?? null; }
+  function updateBufferedRanges() {
+    const buffered = audioEl.value?.buffered ?? null;
+    bufferedRanges.value = buffered;
+
+    if (buffered && buffered.length && trackDuration.value) {
+      let seconds = 0;
+      for (let i = 0; i < buffered.length; i += 1) {
+        seconds += buffered.end(i) - buffered.start(i);
+      }
+      loadProgress.value = Math.min(seconds / trackDuration.value, 1);
+    }
+  }
 
   function bindAudioEvents() {
     const el = audioEl.value;
-    if (!el) return;
-    el.addEventListener('play', () => playing.value = true);
-    el.addEventListener('pause', () => playing.value = false);
-    el.addEventListener('ended', () => playing.value = false);
+    if (!el || _isShuttingDown) return;
+    el.addEventListener('play', () => { playing.value = true; });
+    el.addEventListener('pause', () => { playing.value = false; });
+    el.addEventListener('ended', () => { playing.value = false; telemetry.recordStallEnd(); });
+    el.addEventListener('error', () => telemetry.recordPlaybackError?.('media-element-error'));
   }
 
-  // ── Settings Setters ─────────────────────────────────────────────
+  // ── Settings ───────────────────────────────────────────────────
 
   function setCacheLimit(bytes) {
-    log('setCacheLimit:', bytes, 'current used:', cache.totalSize);
+    log('cache limit:', bytes, 'used:', cache.totalSize);
     cache.maxCacheBytes = bytes;
     telemetry.totalMemory.value = bytes;
-    // Evict if current usage exceeds new limit
-    while (cache.totalSize > cache.maxCacheBytes && cache.cacheMap.size > 0) {
-      const sortedEntries = [...cache.cacheMap.entries()]
-        .map(([index, entry]) => ({ index, ...entry }))
-        .sort((a, b) => a.timestamp - b.timestamp);
-      let evicted = false;
-      for (const entry of sortedEntries) {
-        if (cache.totalSize <= cache.maxCacheBytes) break;
-        if (!cache.protectedPool.has(entry.index)) {
-          cache.remove(entry.index);
-          evicted = true;
-          break; // re-sort after each eviction
-        }
-      }
-      if (!evicted) break;
+    evictToBudget();
+  }
+
+  /** Oldest-first eviction, skipping the protected pool (loop regions). */
+  function evictToBudget() {
+    if (cache.totalSize <= cache.maxCacheBytes) return;
+    const entries = [...cache.cacheMap.entries()]
+      .map(([key, entry]) => ({ key, ...entry }))
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    for (const entry of entries) {
+      if (cache.totalSize <= cache.maxCacheBytes) break;
+      if (cache.protectedPool?.has(entry.key)) continue;
+      cache.remove(entry.key);
     }
     telemetry.updateMemoryUsage(cache.totalSize);
   }
 
   function setSpeedCap(bytesPerSec) {
-    _speedCapBytesPerSec = bytesPerSec;
+    _speedCapBytesPerSec = bytesPerSec || 0;
   }
-
-  // ── Public API ───────────────────────────────────────────────────
 
   return {
     playing, bufferedRanges, error, mseSupported, loadProgress, currentTrackId,
-    trackDuration, playlist, loopRegion, repeatMode,
-    cacheSize, pendingCount,
-    initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume, getCurrentTime, bindAudioEvents,
-    updateBufferedRanges, setCacheLimit, setSpeedCap
+    trackDuration, playlist, loopRegion, repeatMode, cacheSize, pendingCount,
+    fragments, fragmentCount, needsFallback,
+    initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume,
+    getCurrentTime, bindAudioEvents, updateBufferedRanges, setCacheLimit, setSpeedCap,
   };
 }

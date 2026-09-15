@@ -138,7 +138,7 @@ const props = defineProps({
   hasPrevious: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(['next-track', 'previous-track']);
+const emit = defineEmits(['next-track', 'previous-track', 'fallback-v1']);
 
 // ── MSE Buffer Composable ────────────────────────────────────────
 
@@ -338,6 +338,18 @@ async function loadTrackIntoMse(trackId) {
 }
 
 // ── Watch for track changes ──────────────────────────────────────
+
+// A track we cannot fragment, or a browser that cannot decode the result, should hand
+// playback back to the element player instead of sitting there buffering.
+watch(
+  () => mse.needsFallback.value,
+  (needed) => {
+    if (needed) {
+      warn('V2 cannot play this track — switching to V1');
+      emit('fallback-v1');
+    }
+  },
+);
 
 watch(
   () => props.currentTrackId,
