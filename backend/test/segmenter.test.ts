@@ -80,7 +80,7 @@ describe('planSegments', () => {
 
   it('normalizes dotted, upper-case and ffprobe container strings', () => {
     expect(segmenter.planSegments('.M4A').supported).toBe(true);
-    expect(segmenter.planSegments('m4a').format).toBe('.m4a');
+    expect(segmenter.planSegments('m4a').format).toBe('m4a');
 
     // what actually lands in tracks.format today
     expect(segmenter.planSegments('M4A/isom/iso2').supported).toBe(true);

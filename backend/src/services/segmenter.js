@@ -1,9 +1,10 @@
 import { spawn } from 'child_process';
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
-import { dirname, extname, join } from 'path';
+import { join } from 'path';
 import config from '../config/config.js';
 import logger from '../utils/logger.js';
+import { canonicalFormat, formatCandidates } from '../utils/audioFormat.js';
 
 /**
  * MediaSource only accepts *self-describing* fragments (init segment + repeated
@@ -13,36 +14,23 @@ import logger from '../utils/logger.js';
  * segments once, cached outside the scanned music directory.
  */
 
-// `-c copy` for every entry here, so conversion cost is I/O bound (~1s per few minutes).
+// `-c copy` for every entry here, so conversion cost is I/O bound (~50 ms per minute).
+// Other formats are held back until they are verified against real browsers.
 const SEGMENTABLE = {
-  '.m4a': { container: 'fmp4', mime: 'audio/mp4; codecs="mp4a.40.2"' },
+  m4a: { container: 'fmp4', mime: 'audio/mp4; codecs="mp4a.40.2"' },
 };
 
 /**
- * tracks.format stores the ffprobe container string (e.g. "M4A/isom/iso2"), not an
- * extension, so match on every plausible token before giving up.
- */
-function formatCandidates(track) {
-  const raw = String(track.format || '').toLowerCase();
-  const candidates = raw.split(/[^a-z0-9]+/).filter(Boolean);
-  if (track.filepath) {
-    candidates.push(extname(track.filepath).slice(1).toLowerCase());
-  }
-  return candidates;
-}
-
-/**
- * @param source track object ({ format, filepath }) or a bare format/extension string
+ * @param source track object ({ format, filepath }) or a bare format/extension string.
+ *   Format resolution lives in utils/audioFormat because tracks.format holds ffprobe
+ *   container strings such as "M4A/isom/iso2".
  */
 export function planSegments(source) {
-  const track = typeof source === 'string' || !source ? { format: source } : source;
+  const format = canonicalFormat(source);
+  const plan = format && SEGMENTABLE[format];
+  if (plan) return { supported: true, format, ...plan };
 
-  for (const candidate of formatCandidates(track)) {
-    const plan = SEGMENTABLE[`.${candidate}`];
-    if (plan) return { supported: true, format: `.${candidate}`, ...plan };
-  }
-
-  const shown = formatCandidates(track)[0] || 'unknown';
+  const shown = format || formatCandidates(source)[0] || 'unknown';
   return {
     supported: false,
     format: shown,
