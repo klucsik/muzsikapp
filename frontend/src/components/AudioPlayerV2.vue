@@ -134,6 +134,7 @@ const err = (...args) => console.error('[V2]', ...args);
 // ── Props / Emits ────────────────────────────────────────────────
 
 const props = defineProps({
+  playlist: { type: Array, default: () => [] },
   currentTrackId: { type: String, default: null },
   hasNext: { type: Boolean, default: false },
   hasPrevious: { type: Boolean, default: false },
@@ -358,7 +359,7 @@ watch(
     log('trackId watch fired:', { newId, oldId });
     if (newId && newId !== mse.currentTrackId.value) {
       log('loading track into MSE:', newId);
-      loadTrackIntoMse(newId);
+      ensureTrackLoaded(newId);
     } else if (!newId) {
       log('track cleared — shutting down MSE');
       // Track cleared — shut down MSE pipeline
@@ -403,9 +404,18 @@ function stopTimeUpdates() {
 // The server owns playback state and V1 reconciles from these events. V2 has to do the same,
 // otherwise a freshly selected track buffers its bytes and then sits there silently.
 
-async function ensureTrackLoaded(trackId) {
-  if (!trackId || mse.currentTrackId.value === trackId) return;
-  await loadTrackIntoMse(trackId);
+// One load in flight per track: the props watch and the websocket events both ask for the
+// same track when a room starts playing something.
+let _loadPromise = null;
+let _loadFor = null;
+
+function ensureTrackLoaded(trackId) {
+  if (!trackId) return Promise.resolve();
+  if (_loadPromise && _loadFor === trackId) return _loadPromise;
+  if (!_loadPromise && mse.currentTrackId.value === trackId) return Promise.resolve();
+  _loadFor = trackId;
+  _loadPromise = loadTrackIntoMse(trackId).finally(() => { _loadPromise = null; _loadFor = null; });
+  return _loadPromise;
 }
 
 function applyPosition(position) {
@@ -419,14 +429,12 @@ async function handlePlayTrack(data) {
   await mse.play();
 }
 
-function handleStateSync(data) {
+async function handleStateSync(data) {
   const track = data?.currentTrack;
   if (!track) return;
-  if (mse.currentTrackId.value !== track.id) {
-    ensureTrackLoaded(track.id).then(() => applyPosition(data.position));
-  } else {
-    applyPosition(data.position);
-  }
+  // Wait for the load to settle, otherwise play/seek races the SourceBuffer setup.
+  await ensureTrackLoaded(track.id);
+  applyPosition(data.position);
   if (data.playbackState === 'playing') mse.play();
   else if (data.playbackState === 'paused') mse.pause();
 }
@@ -446,6 +454,12 @@ const wsHandlers = [
 ];
 
 watch(mse.playing, (value) => { isPlaying.value = value; });
+
+watch(
+  () => props.playlist,
+  (tracks) => { mse.playlist.value = Array.isArray(tracks) ? tracks : []; },
+  { immediate: true, deep: true },
+);
 
 // ── Lifecycle ────────────────────────────────────────────────────
 
@@ -467,6 +481,13 @@ onMounted(async () => {
   websocket.connect();
   wsHandlers.forEach(([event, handler]) => websocket.on(event, handler));
   log('websocket playback events bound');
+
+  // A track may already be playing when the player is mounted (mode switch, late mount),
+  // in which case the currentTrackId watch never fires.
+  if (props.currentTrackId) {
+    log('mounting with a track already selected:', props.currentTrackId);
+    ensureTrackLoaded(props.currentTrackId);
+  }
 
   // Set initial volume on the audio element once it's ready
   await nextTick();

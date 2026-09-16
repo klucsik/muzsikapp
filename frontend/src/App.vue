@@ -53,6 +53,7 @@
           />
           <AudioPlayerV2 
             v-else
+            :playlist="playlistTracks"
             :current-track-id="currentTrackId"
             :has-next="hasNext"
             :has-previous="hasPrevious"
@@ -116,7 +117,7 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import AudioPlayer from './components/AudioPlayer.vue';
 import AudioPlayerV2 from './components/AudioPlayerV2.vue';
 import MusicLibraryPanel from './components/MusicLibraryPanel.vue';
@@ -148,13 +149,18 @@ export default {
     const toast = useToast();
     
     const playerMode = ref(localStorage.getItem('muzsikapp-player-mode') || 'v1');
-    const setPlayerMode = (mode) => {
+    const setPlayerMode = async (mode) => {
       playerMode.value = mode;
       localStorage.setItem('muzsikapp-player-mode', mode);
+      // The freshly mounted player has no idea what the room is doing, so ask the server.
+      await nextTick();
+      websocket.requestState();
     };
 
     const currentTrackId = ref(null);
     const currentTrack = ref(null);
+    // Mirror of the playlist panel's tracks, so the V2 player can warm the next track.
+    const playlistTracks = ref([]);
     // Load saved room from localStorage or default to 'room-1'
     const savedRoomId = localStorage.getItem('rpg-music-room-id') || 'room-1';
     const currentRoomId = ref(savedRoomId);
@@ -162,6 +168,11 @@ export default {
     const libraryRef = ref(null);
     const folderManagerRef = ref(null);
     const playlistRef = ref(null);
+    watch(
+      () => playlistRef.value?.tracks,
+      (tracks) => { playlistTracks.value = Array.isArray(tracks) ? [...tracks] : []; },
+      { deep: true, flush: 'post' },
+    );
     const manageLibraryRef = ref(null);
     const showManageLibrary = ref(false);
     const stats = ref({
@@ -444,6 +455,7 @@ export default {
     return {
       playerMode,
       setPlayerMode,
+      playlistTracks,
       currentTrackId,
       currentTrack,
       currentRoomId,

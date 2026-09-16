@@ -8,6 +8,7 @@
  */
 
 import { ref, computed } from 'vue';
+import api from '../services/api';
 import { ChunkCache } from '../services/chunkCache.js';
 import { predictNextChunks, CHUNK_DURATION } from '../services/prefetchPredictor.js';
 import { telemetry } from './useTelemetry.js';
@@ -232,7 +233,8 @@ export function useMseBuffer() {
     const signal = _abortController.signal;
     let manifest;
     try {
-      manifest = await fetchManifest(audioBaseUrl, signal);
+      // A warmed track already has its manifest, which skips a round trip on transition.
+      manifest = _manifests.get(trackId) || await fetchManifest(audioBaseUrl, signal);
     } catch (e) {
       if (signal.aborted) return;
       if (e.fallback === 'v1' || e.code === 'UNSUPPORTED_FORMAT') {
@@ -248,6 +250,7 @@ export function useMseBuffer() {
     fragments.value = manifest.fragments || [];
     trackDuration.value = manifest.durationSec || duration || 0;
     _initEnd = manifest.initEnd || 0;
+    if (fragments.value.length) _manifests.set(trackId, manifest);
 
     if (!isMseSupported(manifest.mime)) {
       warn('browser cannot decode', manifest.mime, '— falling back to V1');
@@ -382,6 +385,72 @@ export function useMseBuffer() {
     return fetchFragmentInSequence(next);
   }
 
+  // ── Next-track warming ─────────────────────────────────────────
+  // The cache is keyed by track id and survives shutdown(), so fragments fetched for the
+  // upcoming playlist item are already in memory when the transition happens.
+
+  const NEXT_TRACK_FRAGMENTS = 2;
+  const _manifests = new Map(); // trackId -> manifest, also reused by loadTrack
+
+  function nextPlaylistTrackId() {
+    const list = playlist.value || [];
+    if (list.length < 2) return null;
+    const idx = list.findIndex((t) => t?.id === currentTrackId.value);
+    if (idx === -1) return null;
+    if (repeatMode.value === 'one') return list[idx].id; // same track again
+    const next = idx + 1;
+    if (next >= list.length) {
+      // Only wrap when the playlist itself repeats.
+      return repeatMode.value === 'all' ? list[0].id : null;
+    }
+    return list[next].id;
+  }
+
+  /** Fetch the init segment plus the first fragments of another track into the cache. */
+  async function warmTrackFragments(trackId, count = NEXT_TRACK_FRAGMENTS) {
+    if (!trackId || trackId === currentTrackId.value) return;
+    const wanted = [`${trackId}-init`];
+    for (let i = 0; i < count; i += 1) wanted.push(`${trackId}-${i}`);
+    if (wanted.every((key) => cache.has(key))) return;
+
+    const url = api.getAudioUrl(trackId);
+    try {
+      let meta = _manifests.get(trackId);
+      if (!meta) {
+        meta = await fetchManifest(url);
+        _manifests.set(trackId, meta);
+      }
+      const base = meta.url ? url : api.getAudioUrl(trackId);
+
+      const initKey = `${trackId}-init`;
+      if (meta.initEnd && !cache.has(initKey)) {
+        cache.markPending(initKey);
+        try {
+          cache.put(initKey, await fetchRange(base, 0, meta.initEnd - 1));
+        } finally {
+          cache.unmarkPending(initKey);
+        }
+      }
+
+      const total = Math.min(count, (meta.fragments || []).length);
+      for (let i = 0; i < total; i += 1) {
+        const key = `${trackId}-${i}`;
+        if (cache.has(key)) continue;
+        const fragment = meta.fragments[i];
+        cache.markPending(key);
+        try {
+          cache.put(key, await fetchRange(base, fragment.offset, fragment.offset + fragment.size - 1));
+        } finally {
+          cache.unmarkPending(key);
+        }
+      }
+      telemetry.updateMemoryUsage(cache.totalSize);
+      log(`warmed next track ${String(trackId).slice(0, 8)}: init + ${total} fragments`);
+    } catch (e) {
+      if (e?.name !== 'AbortError') warn('next-track warm failed:', e.message || e);
+    }
+  }
+
   /** Seconds of decoded audio already buffered in front of `currentTime`. */
   function bufferedAheadSec(currentTime) {
     const buffered = audioEl.value?.buffered;
@@ -514,6 +583,12 @@ export function useMseBuffer() {
         && bufferedAheadSec(currentTime) < PREFETCH_LOOKAHEAD_SEC
       ) {
         fetchFragmentInSequence(Math.max(_lastAppendedIndex + 1, currentIndex));
+      }
+
+      // Nothing left to do for this track — spend the idle bandwidth on the next one.
+      if (!_sequentialFetchInFlight && bufferedAheadSec(currentTime) >= PREFETCH_LOOKAHEAD_SEC) {
+        const nextId = nextPlaylistTrackId();
+        if (nextId) warmTrackFragments(nextId);
       }
 
       for (const index of wanted) {
@@ -652,5 +727,6 @@ export function useMseBuffer() {
     fragments, fragmentCount, needsFallback,
     initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume,
     getCurrentTime, bindAudioEvents, updateBufferedRanges, setCacheLimit, setSpeedCap,
+    warmTrackFragments, nextPlaylistTrackId,
   };
 }
