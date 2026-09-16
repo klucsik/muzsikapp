@@ -57,6 +57,8 @@ docker run -d \
   -e SCAN_ON_STARTUP=true \
   -e WATCH_FILE_CHANGES=true \
   -e YTDLP_PATH=/usr/local/bin/yt-dlp \
+  -e AUTH_PASSWORD=alma \
+  -e JWT_SECRET=change-this-in-production-use-random-string \
   "$IMAGE_NAME:$TAG"
 
 echo "✅ Container started successfully"
