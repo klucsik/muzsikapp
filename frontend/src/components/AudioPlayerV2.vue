@@ -167,9 +167,6 @@
       :total-stall-duration="telemetryData.totalStallDuration"
       :cached-chunks="cachedChunkCount"
       :downloading-count="mse.pendingCount.value || 0"
-      :fragment-rows="fragmentRows"
-      :warmed-tracks="warmedTracks"
-      :next-track-label="nextTrackLabel"
       @update-cache-limit="onUpdateCacheLimit"
       @update-speed-cap="onUpdateSpeedCap"
     />
@@ -256,45 +253,6 @@ const loadProgressPct = computed(() => mse.loadProgress.value * 100);
 // ── Chunk inventory ────────────────────────────────────────────
 
 const cachedChunkCount = computed(() => mse.cachedChunkCount.value || 0);
-
-/** The fragment table lives in the settings panel, so hand it display strings, not shapes. */
-const fragmentRows = computed(() =>
-  (mse.chunkRows.value || []).map((row) => ({
-    index: row.index,
-    time: `${formatTime(row.start)}–${formatTime(row.end)}`,
-    size: formatBytes(row.bytes),
-    state: row.state,
-    current: duration.value > 0 && currentTime.value >= row.start && currentTime.value < (row.end || Infinity),
-  })),
-);
-
-const warmedTracks = computed(() =>
-  (mse.warmedTracks.value || []).map((track) => ({
-    trackId: track.trackId,
-    name: trackName(track.trackId),
-    label: `${track.init ? 'init + ' : ''}${track.chunks} fragments`,
-    size: formatBytes(track.bytes),
-  })),
-);
-
-const nextTrackLabel = computed(() => {
-  const id = mse.nextPlaylistTrackId();
-  return id ? trackName(id) : '';
-});
-
-function trackName(trackId) {
-  const track = (props.playlist || []).find((t) => (t?.id ?? t?.trackId) === trackId);
-  if (track?.title) return track.title;
-  if (currentTrack.value?.id === trackId) return currentTrack.value.title;
-  return String(trackId).slice(0, 8);
-}
-
-function formatBytes(bytes) {
-  if (!bytes) return '—';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 /**
  * Convert MSE buffered TimeRanges into an array of { start, width } percent blocks.

@@ -143,30 +143,6 @@ describe('AudioPlayerV2 controls', () => {
     vi.useRealTimers();
   });
 
-  it('hands the fragment inventory to the settings panel instead of rendering it inline', async () => {
-    // Seed the fake composable before the mount: the fake's `nextPlaylistTrackId` is a plain
-    // mock, so a computed evaluated earlier would never see the new return value.
-    await import('../src/composables/useMseBuffer.js');
-    mse.chunkRows.value = [{ index: 0, start: 0, end: 30, bytes: 1024, state: 'cached' }];
-    mse.warmedTracks.value = [{ trackId: 't2', init: true, chunks: 2, bytes: 2048 }];
-    mse.nextPlaylistTrackId.mockReturnValue('t2');
-
-    const wrapper = await mountPlayer();
-    await flushPromises();
-
-    const panel = wrapper.findComponent({ name: 'SettingsPanel' });
-    expect(panel.props('fragmentRows')).toEqual([
-      { index: 0, time: '0:00–0:30', size: '1 KB', state: 'cached', current: true },
-    ]);
-    expect(panel.props('warmedTracks')[0]).toMatchObject({
-      name: 't2',
-      label: 'init + 2 fragments',
-      size: '2 KB',
-    });
-    expect(panel.props('nextTrackLabel')).toBe('t2');
-    wrapper.unmount();
-  });
-
   it('treats a pause at the end of the track as the track finishing, not as a seek', async () => {
     const wrapper = await mountPlayer();
     mse.trackDuration.value = 176.8;
