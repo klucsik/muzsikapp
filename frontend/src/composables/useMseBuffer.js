@@ -7,7 +7,7 @@
  * on immutable byte spans instead of arbitrary slices that no decoder can parse.
  */
 
-import { ref, computed } from 'vue';
+import { ref, computed, watch, toRaw } from 'vue';
 import api from '../services/api';
 import { ChunkCache } from '../services/chunkCache.js';
 import { predictNextChunks, CHUNK_DURATION } from '../services/prefetchPredictor.js';
@@ -26,6 +26,10 @@ const PREFETCH_INTERVAL_MS = 5000;
 // chain walks to the end of the track and downloads a 60-minute file on the first click.
 const PREFETCH_LOOKAHEAD_SEC = 90;
 const MAX_APPEND_RETRIES = 2;
+
+// Cache keys are `${trackId}-${index}` (or `-init`). Track ids are UUIDs containing dashes,
+// so the suffix has to be anchored: the id is everything before the *last* dash.
+const CACHE_KEY_RE = /^(.+)-(init|\d+)$/;
 
 export function isMseSupported(mimeType = DEFAULT_MIME) {
   return typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(mimeType);
@@ -74,27 +78,108 @@ export function useMseBuffer() {
   const playlist = ref([]);
   const loopRegion = ref(null); // { startSec, endSec }
   const repeatMode = ref('none');
+  // The room's 🔄 Loop Playlist flag. Separate from the repeat button: it repeats the queue,
+  // so it is what makes the first track the successor of the last one.
+  const playlistLoop = ref(false);
 
   const playing = ref(false);
-  const bufferedRanges = ref(null);
+  /** @type {{ value: Array<{ start: number, end: number }> }} plain snapshots of element.buffered */
+  const bufferedRanges = ref([]);
   const error = ref(null);
   const mseSupported = ref(isMseSupported());
   const needsFallback = ref(false);
   const loadProgress = ref(0);
 
-  const cacheSize = computed(() => cache.totalSize);
-  const pendingCount = computed(() => {
-    let count = 0;
-    for (const key of cache.pendingIndices) {
-      if (typeof key === 'string' || typeof key === 'number') count += 1;
+  // ChunkCache is a plain Map, so nothing inside it is reactive. Every mutation bumps this
+  // counter and the stats computeds below depend on it — without this the UI reads the very
+  // first value forever and the buffer panel looks frozen at zero chunks.
+  const cacheVersion = ref(0);
+  const touchCache = () => { cacheVersion.value += 1; };
+
+  const cachePut = (key, buffer) => { cache.put(key, buffer); touchCache(); };
+  const cacheRemove = (key) => { cache.remove(key); touchCache(); };
+  const markPending = (key) => { cache.markPending?.(key); touchCache(); };
+  const unmarkPending = (key) => { cache.unmarkPending?.(key); touchCache(); };
+
+  const cacheSize = computed(() => {
+    void cacheVersion.value;
+    return cache.totalSize;
+  });
+
+  /** Every cached chunk of every track, newest eviction order aside. */
+  const cachedKeys = computed(() => {
+    void cacheVersion.value;
+    const keys = [];
+    for (const key of cache.cacheMap.keys()) {
+      if (CACHE_KEY_RE.test(key)) keys.push(key);
     }
-    return count;
+    return keys;
+  });
+
+  const cachedChunkCount = computed(() => cachedKeys.value.length);
+
+  const pendingKeys = computed(() => {
+    void cacheVersion.value;
+    return [...cache.pendingIndices].filter((key) => CACHE_KEY_RE.test(key));
+  });
+
+  const pendingCount = computed(() => pendingKeys.value.length);
+
+  /**
+   * Per-fragment inventory for the current track: byte range, size and whether the bytes are
+   * in cache, in flight, or still missing. Drives the chunk list in the player.
+   */
+  const chunkRows = computed(() => {
+    void cacheVersion.value;
+    const trackId = currentTrackId.value;
+    if (!trackId) return [];
+    return fragments.value.map((fragment, index) => {
+      const key = `${trackId}-${index}`;
+      const entry = cache.cacheMap.get(key);
+      const state = entry ? 'cached' : cache.pendingIndices.has(key) ? 'downloading' : 'missing';
+      const start = fragment.start ?? 0;
+      const end = fragment.end ?? (trackDuration.value
+        ? ((index + 1) * trackDuration.value) / fragments.value.length
+        : 0);
+      return {
+        index,
+        start,
+        end,
+        offset: fragment.offset,
+        bytes: entry?.buffer.byteLength ?? fragment.size ?? 0,
+        downloaded: !!entry,
+        state,
+      };
+    });
+  });
+
+  /** Other tracks whose bytes are already in the cache (next-track warming). */
+  const warmedTracks = computed(() => {
+    void cacheVersion.value;
+    const byTrack = new Map();
+    for (const [key, entry] of cache.cacheMap) {
+      const match = CACHE_KEY_RE.exec(key);
+      if (!match) continue;
+      const [, trackId, suffix] = match;
+      if (trackId === currentTrackId.value) continue;
+      const record = byTrack.get(trackId) || { trackId, init: false, chunks: 0, bytes: 0 };
+      if (suffix === 'init') record.init = true;
+      else record.chunks += 1;
+      record.bytes += entry.buffer.byteLength;
+      byTrack.set(trackId, record);
+    }
+    return [...byTrack.values()];
   });
 
   let _speedCapBytesPerSec = 0; // 0 = unlimited
   let _abortController = null;
   let _sequentialFetchInFlight = false;
   let _isShuttingDown = false;
+  // Bumped by shutdown(). An in-flight load of an earlier generation must not touch shared state
+  // any more: appending into a MediaSource that was already ended is what makes Chromium kill
+  // the pipeline with CHUNK_DEMUXER_ERROR_APPEND_FAILED, and the room can switch tracks (or
+  // rooms) faster than the element swaps src.
+  let _loadToken = 0;
   let _prefetchInterval = null;
   let _stallDetectionInterval = null;
   let _audioBaseUrl = '';
@@ -103,6 +188,12 @@ export function useMseBuffer() {
   let _lastAppendedIndex = -1;
   let _appendQueue = []; // fragment indices waiting for the SourceBuffer to free up
   let _appendRetries = 0;
+
+  function onSourceBufferError() {
+    const sb = sourceBuffer.value;
+    err('SourceBuffer error (readyState:', sb?.updating ? 'updating' : 'idle', ')');
+    telemetry.recordPlaybackError?.('sourcebuffer-error');
+  }
 
   // ── Fragment geometry ──────────────────────────────────────────
 
@@ -133,11 +224,18 @@ export function useMseBuffer() {
     if (_isShuttingDown) { warn('initMediaSource blocked by shutdown'); return; }
 
     const ms = new MediaSource();
+    const token = _loadToken;
     mediaSource.value = ms;
     manifestMime.value = mimeType;
     el.src = URL.createObjectURL(ms);
 
     ms.addEventListener('sourceopen', () => {
+      // A shutdown or a newer load replaced this MediaSource while the element was swapping
+      // srcs. Wiring up its SourceBuffer would hand the pipeline back to a dead stream.
+      if (token !== _loadToken || toRaw(mediaSource.value) !== ms) {
+        warn('ignoring sourceopen from a superseded MediaSource');
+        return;
+      }
       try {
         const sb = ms.addSourceBuffer(mimeType);
         sourceBuffer.value = sb;
@@ -146,10 +244,7 @@ export function useMseBuffer() {
         // appending a fragment after a seek lands at the right media time. 'sequence' would
         // glue it to the end of the buffer instead.
         sb.addEventListener('updateend', onSourceBufferUpdateEnd);
-        sb.addEventListener('error', () => {
-          err('SourceBuffer error (readyState:', sb.updating ? 'updating' : 'idle', ')');
-          telemetry.recordPlaybackError?.('sourcebuffer-error');
-        });
+        sb.addEventListener('error', onSourceBufferError);
       } catch (e) {
         err('failed to add SourceBuffer:', e.message || e);
         error.value = e;
@@ -177,6 +272,7 @@ export function useMseBuffer() {
 
   function shutdown(silent = false) {
     if (!silent) log('shutdown called');
+    _loadToken++;
     if (_stallDetectionInterval) { clearInterval(_stallDetectionInterval); _stallDetectionInterval = null; }
     const alreadyDown = _isShuttingDown;
     _isShuttingDown = true;
@@ -185,13 +281,26 @@ export function useMseBuffer() {
     if (_abortController) { _abortController.abort(); _abortController = null; }
 
     const sb = sourceBuffer.value;
-    if (sb && mediaSource.value) {
+    const ms = mediaSource.value;
+    if (sb) {
       sb.removeEventListener('updateend', onSourceBufferUpdateEnd);
-      try {
-        // endOfStream() throws while an update is in flight; the element is being torn down
-        // anyway, so ignore it rather than log spurious errors on every track change.
-        if (!sb.updating && mediaSource.value.readyState === 'open') mediaSource.value.endOfStream();
-      } catch (_) { /* tearing down */ }
+      sb.removeEventListener('error', onSourceBufferError);
+      // Detaching the SourceBuffer is what actually releases its demuxer/decoder. Leaving it
+      // attached to a soon-orphaned MediaSource leaks one per track change, and Chromium then
+      // refuses the next addSourceBuffer with "this MediaSource has reached the limit of
+      // SourceBuffer objects" — after which nothing plays and every bar reads empty.
+      // 'ended' is the usual state at the end of a track and still owns the decoder, so only a
+      // closed MediaSource is skipped. An updating SourceBuffer refuses to be detached until its
+      // append finishes, hence the one-shot retry after `updateend`.
+      if (ms && ms.readyState !== 'closed') {
+        const detach = () => { try { ms.removeSourceBuffer(sb); } catch (_) { /* GC will take it */ } };
+        if (sb.updating) {
+          try { sb.abort(); } catch (_) { /* tearing down */ }
+          sb.addEventListener('updateend', detach, { once: true });
+        } else {
+          detach();
+        }
+      }
     }
 
     const el = audioEl.value;
@@ -214,7 +323,7 @@ export function useMseBuffer() {
     playing.value = false;
     error.value = null;
     needsFallback.value = false;
-    bufferedRanges.value = null;
+    bufferedRanges.value = [];
     loadProgress.value = 0;
     _isShuttingDown = false;
   }
@@ -258,10 +367,26 @@ export function useMseBuffer() {
       return;
     }
 
+    const token = _loadToken;
     initMediaSource(audioElRef, manifest.mime);
-    await waitForSourceOpen();
+    try {
+      await waitForSourceOpen(token);
+    } catch (e) {
+      if (token !== _loadToken) return; // a newer load owns the element now
+      warn('MediaSource never opened:', e.message || e);
+      if (!error.value) error.value = new Error('MediaSource unavailable');
+      return;
+    }
+    if (token !== _loadToken) {
+      warn('load superseded before append:', trackId);
+      return;
+    }
 
-    if (!sourceBuffer.value || error.value) {
+    // Only the SourceBuffer itself proves the stream is usable: `error` can hold an unrelated
+    // rejection that landed while waiting — an autoplay block is routine before a user gesture,
+    // and treating it as a dead MediaSource used to abort the load after the init segment was
+    // skipped, which then poisoned the pipeline with init-less appends.
+    if (!sourceBuffer.value) {
       err('loadTrack aborted: no SourceBuffer');
       if (!error.value) error.value = new Error('MediaSource unavailable');
       return;
@@ -272,7 +397,7 @@ export function useMseBuffer() {
     }
 
     await loadInitSegment();
-    if (_isShuttingDown || currentTrackId.value !== trackId) return;
+    if (_isShuttingDown || token !== _loadToken || currentTrackId.value !== trackId) return;
 
     startPrefetching();
     const startIndex = fragmentIndexForTime(audioElRef?.currentTime || 0);
@@ -288,7 +413,7 @@ export function useMseBuffer() {
       let buffer = cache.get(key);
       if (!buffer) {
         buffer = await fetchRange(_audioBaseUrl, 0, _initEnd - 1, _abortController?.signal);
-        cache.put(key, buffer);
+        cachePut(key, buffer);
       }
       await appendBuffer(buffer, { init: true });
       _initAppended = true;
@@ -300,7 +425,7 @@ export function useMseBuffer() {
     }
   }
 
-  function waitForSourceOpen() {
+  function waitForSourceOpen(token = _loadToken) {
     return new Promise((resolve, reject) => {
       const ms = mediaSource.value;
       if (!ms) return reject(new Error('No MediaSource'));
@@ -308,8 +433,14 @@ export function useMseBuffer() {
 
       let timerId = null;
       const onOpen = () => {
-        if (mediaSource.value?.readyState !== 'open') return;
-        mediaSource.value.removeEventListener('sourceopen', onOpen);
+        // `sourceopen` only fires when the stream really is open, so the instance check is all
+        // that is left: anything else belongs to a load that has already been replaced.
+        if (token !== _loadToken || toRaw(mediaSource.value) !== ms) {
+          clearTimeout(timerId);
+          reject(new Error('Load superseded'));
+          return;
+        }
+        ms.removeEventListener('sourceopen', onOpen);
         clearTimeout(timerId);
         resolve();
       };
@@ -331,6 +462,12 @@ export function useMseBuffer() {
     const trackAtStart = currentTrackId.value;
     const cacheKey = `${trackAtStart}-${index}`;
 
+    // Fragments are only decodable behind their init segment. A load that was replaced (or
+    // aborted) leaves _initAppended false, and appending raw media here is what Chromium reports
+    // as CHUNK_DEMUXER_ERROR_APPEND_FAILED.
+    if (!_initAppended) await loadInitSegment();
+    if (_isShuttingDown || currentTrackId.value !== trackAtStart) return;
+
     const cached = cache.get(cacheKey);
     if (cached) {
       await appendBuffer(cached, { index });
@@ -342,7 +479,7 @@ export function useMseBuffer() {
     try {
       const fragment = fragments.value[index];
       _sequentialFetchInFlight = true;
-      cache.markPending(cacheKey);
+      markPending(cacheKey);
       const startedAt = performance.now();
       log(`fragment ${index}: bytes=${fragment.offset}-${fragment.offset + fragment.size - 1}`);
 
@@ -359,7 +496,7 @@ export function useMseBuffer() {
       await respectSpeedCap(buffer.byteLength, startedAt);
 
       telemetry.recordDownload(buffer.byteLength, elapsedSec);
-      cache.put(cacheKey, buffer);
+      cachePut(cacheKey, buffer);
       telemetry.updateMemoryUsage(cache.totalSize);
       log(`fragment ${index}: ${buffer.byteLength} bytes in ${elapsedSec.toFixed(2)}s`);
 
@@ -367,7 +504,7 @@ export function useMseBuffer() {
       return nextFragment(index);
     } catch (e) {
       _sequentialFetchInFlight = false;
-      cache.unmarkPending?.(cacheKey);
+      unmarkPending(cacheKey);
       if (e?.name === 'AbortError') return;
       err(`fragment ${index} fetch error:`, e.message || e);
       telemetry.recordDownloadError?.();
@@ -391,65 +528,111 @@ export function useMseBuffer() {
 
   const NEXT_TRACK_FRAGMENTS = 2;
   const _manifests = new Map(); // trackId -> manifest, also reused by loadTrack
+  const _warmInFlight = new Set(); // trackIds with a warm already running (the ticker fires every 5s)
+
+  /** Server repeat is a boolean meaning “replay the current track”, which maps to 'one'. */
+  /** 🔄 Loop Playlist, as broadcast by the room (`loop_mode_change` / `state_sync`). */
+  function setPlaylistLoop(enabled) { playlistLoop.value = !!enabled; }
+
+  function setRepeatMode(value) {
+    repeatMode.value = value === true ? 'one' : (value === false ? 'none' : (value || 'none'));
+  }
+
+  function trackIdOf(entry) {
+    return entry?.id ?? entry?.trackId ?? null;
+  }
 
   function nextPlaylistTrackId() {
     const list = playlist.value || [];
     if (list.length < 2) return null;
-    const idx = list.findIndex((t) => t?.id === currentTrackId.value);
+    const idx = list.findIndex((t) => trackIdOf(t) === currentTrackId.value);
     if (idx === -1) return null;
-    if (repeatMode.value === 'one') return list[idx].id; // same track again
+    if (repeatMode.value === 'one') return trackIdOf(list[idx]); // same track again
     const next = idx + 1;
     if (next >= list.length) {
       // Only wrap when the playlist itself repeats.
-      return repeatMode.value === 'all' ? list[0].id : null;
+      return repeatMode.value === 'all' || playlistLoop.value ? trackIdOf(list[0]) : null;
     }
-    return list[next].id;
+    return trackIdOf(list[next]);
   }
 
   /** Fetch the init segment plus the first fragments of another track into the cache. */
   async function warmTrackFragments(trackId, count = NEXT_TRACK_FRAGMENTS) {
-    if (!trackId || trackId === currentTrackId.value) return;
+    if (!trackId || trackId === currentTrackId.value || _isShuttingDown) return;
+    if (_warmInFlight.has(trackId)) return;
     const wanted = [`${trackId}-init`];
     for (let i = 0; i < count; i += 1) wanted.push(`${trackId}-${i}`);
     if (wanted.every((key) => cache.has(key))) return;
 
     const url = api.getAudioUrl(trackId);
+    const trackAtStart = currentTrackId.value;
+    _warmInFlight.add(trackId);
     try {
       let meta = _manifests.get(trackId);
       if (!meta) {
         meta = await fetchManifest(url);
         _manifests.set(trackId, meta);
       }
-      const base = meta.url ? url : api.getAudioUrl(trackId);
 
-      const initKey = `${trackId}-init`;
-      if (meta.initEnd && !cache.has(initKey)) {
-        cache.markPending(initKey);
-        try {
-          cache.put(initKey, await fetchRange(base, 0, meta.initEnd - 1));
-        } finally {
-          cache.unmarkPending(initKey);
-        }
-      }
-
+      const keys = [];
+      if (meta.initEnd && !cache.has(`${trackId}-init`)) keys.push({ key: `${trackId}-init`, offset: 0, size: meta.initEnd });
       const total = Math.min(count, (meta.fragments || []).length);
       for (let i = 0; i < total; i += 1) {
-        const key = `${trackId}-${i}`;
-        if (cache.has(key)) continue;
         const fragment = meta.fragments[i];
-        cache.markPending(key);
+        const key = `${trackId}-${i}`;
+        if (!cache.has(key)) keys.push({ key, offset: fragment.offset, size: fragment.size });
+      }
+
+      let fetched = 0;
+      for (const item of keys) {
+        // Bail out if playback moved on while we were downloading.
+        if (_isShuttingDown || currentTrackId.value !== trackAtStart) break;
+        markPending(item.key);
         try {
-          cache.put(key, await fetchRange(base, fragment.offset, fragment.offset + fragment.size - 1));
+          cachePut(item.key, await fetchRange(url, item.offset, item.offset + item.size - 1));
+          fetched += 1;
         } finally {
-          cache.unmarkPending(key);
+          unmarkPending(item.key);
         }
       }
       telemetry.updateMemoryUsage(cache.totalSize);
-      log(`warmed next track ${String(trackId).slice(0, 8)}: init + ${total} fragments`);
+      if (fetched) log(`warmed next track ${String(trackId).slice(0, 8)}: ${fetched} segments`);
     } catch (e) {
       if (e?.name !== 'AbortError') warn('next-track warm failed:', e.message || e);
+    } finally {
+      _warmInFlight.delete(trackId);
     }
   }
+
+  /**
+   * True once the current track no longer needs the bandwidth: either the reserve in front of
+   * the playhead is full or the whole track is already fetched.
+   */
+  function nextTrackBandwidthFree() {
+    if (_sequentialFetchInFlight || !_initAppended) return false;
+    const currentTime = audioEl.value?.currentTime || 0;
+    const remainingInTrack = trackDuration.value
+      ? Math.max(trackDuration.value - currentTime, 0)
+      : PREFETCH_LOOKAHEAD_SEC;
+    return bufferedAheadSec(currentTime) >= Math.min(PREFETCH_LOOKAHEAD_SEC, remainingInTrack) - 0.5
+      || _lastAppendedIndex + 1 >= fragmentCount.value;
+  }
+
+  const nextTrackId = computed(() => nextPlaylistTrackId());
+
+  // Turning the loop on while sitting on the last item redefines "next" as the first track, and
+  // the prefetch ticker is the only thing that warms it — a paused player never ticks, so the
+  // wrap-around track would stay cold until the transition. React to the target changing instead.
+  watch(nextTrackId, (id, previous) => {
+    if (!id || id === previous || id === currentTrackId.value) return;
+    // No element attached means nothing is loaded, so this is a fresh player, not a listener
+    // waiting on the end of the playlist. Warming here would download ahead on an empty queue.
+    if (!audioEl.value) return;
+    // While audio is actually playing, leave it to the ticker unless the current track has
+    // caught up — competing with the track being heard is how stalls happen.
+    if (playing.value && !nextTrackBandwidthFree()) return;
+    warmTrackFragments(id);
+  });
 
   /** Seconds of decoded audio already buffered in front of `currentTime`. */
   function bufferedAheadSec(currentTime) {
@@ -511,7 +694,7 @@ export function useMseBuffer() {
           }
           err('append failed:', e.message || e);
           telemetry.recordDownloadError?.();
-          cache.remove(`${currentTrackId.value}-${item.index}`);
+          cacheRemove(`${currentTrackId.value}-${item.index}`);
           item.resolve();
         }
         return; // wait for updateend
@@ -545,6 +728,32 @@ export function useMseBuffer() {
     _appendRetries = 0;
     updateBufferedRanges();
     drainAppendQueue();
+    maybeEndStream();
+  }
+
+  /**
+   * An open MediaSource never fires `ended`: the element just stalls at the end of the buffer.
+   * Once the last fragment is decoded into the buffer, close the stream so playback finishes the
+   * way a plain file does and the player can rely on the real event instead of a watchdog.
+   */
+  function maybeEndStream() {
+    const sb = sourceBuffer.value;
+    const ms = mediaSource.value;
+    const el = audioEl.value;
+    if (!sb || !ms || !el || sb.updating || ms.readyState !== 'open') return;
+    if (!fragmentCount.value || _lastAppendedIndex + 1 < fragmentCount.value) return;
+
+    const total = trackDuration.value || el.duration;
+    if (!total || !Number.isFinite(total)) return;
+    const buffered = el.buffered;
+    if (!buffered.length || buffered.end(buffered.length - 1) < total - 0.5) return;
+
+    try {
+      ms.endOfStream();
+      log('stream closed at', total.toFixed(1));
+    } catch (_) {
+      // An append started between the checks; the next updateend gets another turn.
+    }
   }
 
   // ── Prefetching (background) ───────────────────────────────────
@@ -585,8 +794,10 @@ export function useMseBuffer() {
         fetchFragmentInSequence(Math.max(_lastAppendedIndex + 1, currentIndex));
       }
 
-      // Nothing left to do for this track — spend the idle bandwidth on the next one.
-      if (!_sequentialFetchInFlight && bufferedAheadSec(currentTime) >= PREFETCH_LOOKAHEAD_SEC) {
+      // Nothing useful left to download for *this* track — spend the idle bandwidth on the next
+      // one. Comparing against the raw lookahead alone never fires on short tracks, or near the
+      // end of a long one, because the remaining audio is smaller than the reserve.
+      if (nextTrackBandwidthFree()) {
         const nextId = nextPlaylistTrackId();
         if (nextId) warmTrackFragments(nextId);
       }
@@ -604,20 +815,20 @@ export function useMseBuffer() {
     const key = `${trackAtStart}-${index}`;
     if (cache.has(key)) return;
 
-    cache.markPending(key);
+    markPending(key);
     try {
       const fragment = fragments.value[index];
       const startedAt = performance.now();
       const buffer = await fetchRange(_audioBaseUrl, fragment.offset, fragment.offset + fragment.size - 1);
       telemetry.recordDownload(buffer.byteLength, Math.max((performance.now() - startedAt) / 1000, 0.001));
       if (currentTrackId.value === trackAtStart) {
-        cache.put(key, buffer);
+        cachePut(key, buffer);
         telemetry.updateMemoryUsage(cache.totalSize);
       }
     } catch (e) {
       if (e?.name !== 'AbortError') warn(`prefetch ${index} failed:`, e.message || e);
     } finally {
-      cache.unmarkPending?.(key);
+      unmarkPending(key);
     }
   }
 
@@ -628,6 +839,9 @@ export function useMseBuffer() {
     try {
       await audioEl.value.play();
       playing.value = true;
+      // A later successful play is the proof the old failure (usually an autoplay block) no
+      // longer applies; leaving it set keeps the error/unlock overlay up over working playback.
+      error.value = null;
     } catch (e) {
       err('play failed:', e.message || e);
       error.value = e;
@@ -644,15 +858,49 @@ export function useMseBuffer() {
     else await play();
   }
 
+  /**
+   * `maybeEndStream()` closes the MediaSource so the element fires a real `ended`. A seek back
+   * into (or forward inside) the track must reopen it first: appending to an 'ended' MediaSource
+   * throws InvalidStateError, which would silently strand the playhead. Assigning `duration` is
+   * the spec'd way to move readyState from 'ended' back to 'open'.
+   */
+  function reopenIfEnded(seconds) {
+    const ms = mediaSource.value;
+    if (!ms || ms.readyState !== 'ended') return;
+    const total = trackDuration.value || audioEl.value?.duration || 0;
+    if (total && seconds < total - 0.25) {
+      try {
+        ms.duration = total;
+        log('MediaSource reopened for seek to', seconds.toFixed(2));
+      } catch (e) {
+        warn('failed to reopen MediaSource:', e.message || e);
+      }
+    }
+  }
+
   /** Seeking may land on a fragment we never fetched, so kick the pipeline from there. */
   function seek(seconds) {
     const el = audioEl.value;
     if (!el) return;
-    el.currentTime = seconds;
-    const index = fragmentIndexForTime(seconds);
-    if (index > _lastAppendedIndex || !isTimeBuffered(seconds)) {
+    const total = trackDuration.value || el.duration || 0;
+    // Never park the playhead on the last frame: that is the region a closing stream owns, and
+    // it reads as "unbuffered" a moment later, which used to re-append the final fragment.
+    const target = total > 0 ? Math.min(Math.max(seconds, 0), Math.max(0, total - 0.05)) : Math.max(seconds, 0);
+    reopenIfEnded(target);
+    el.currentTime = target;
+
+    const index = fragmentIndexForTime(target);
+    const tailAppended = fragmentCount.value > 0 && _lastAppendedIndex >= fragmentCount.value - 1;
+    if (target >= total - 0.25 && (isTimeBuffered(target) || tailAppended)) {
+      log(`seek ${target.toFixed(2)}s → track end, nothing to fetch`);
+      return;
+    }
+    if (index > _lastAppendedIndex || !isTimeBuffered(target)) {
       _lastAppendedIndex = Math.min(_lastAppendedIndex, index - 1);
+      log(`seek ${target.toFixed(2)}s → fragment ${index}, appending from ${_lastAppendedIndex + 1}`);
       fetchFragmentInSequence(index);
+    } else {
+      log(`seek ${target.toFixed(2)}s → fragment ${index} already buffered`);
     }
   }
 
@@ -671,22 +919,41 @@ export function useMseBuffer() {
 
   function getCurrentTime() { return audioEl.value?.currentTime || 0; }
 
+  /**
+   * Snapshot the element's TimeRanges into plain objects.
+   *
+   * `HTMLMediaElement.buffered` is a single mutable object, so assigning it to a ref never
+   * changes identity and Vue would keep rendering the first snapshot forever — which is why
+   * the cached-region indicators used to look frozen.
+   */
   function updateBufferedRanges() {
-    const buffered = audioEl.value?.buffered ?? null;
-    bufferedRanges.value = buffered;
+    const buffered = audioEl.value?.buffered;
+    if (buffered) {
+      const spans = [];
+      for (let i = 0; i < buffered.length; i += 1) spans.push({ start: buffered.start(i), end: buffered.end(i) });
+      const changed = spans.length !== bufferedRanges.value.length
+        || spans.some((span, i) => span.start !== bufferedRanges.value[i].start || span.end !== bufferedRanges.value[i].end);
+      if (changed) bufferedRanges.value = spans;
 
-    if (buffered && buffered.length && trackDuration.value) {
-      let seconds = 0;
-      for (let i = 0; i < buffered.length; i += 1) {
-        seconds += buffered.end(i) - buffered.start(i);
+      if (trackDuration.value) {
+        let seconds = 0;
+        for (const span of spans) seconds += span.end - span.start;
+        loadProgress.value = Math.min(seconds / trackDuration.value, 1);
       }
-      loadProgress.value = Math.min(seconds / trackDuration.value, 1);
+    } else if (bufferedRanges.value.length) {
+      bufferedRanges.value = [];
     }
   }
+
+  // The audio element outlives a track change, so the listeners must be attached once —
+  // rebinding on every loadTrack stacks duplicate handlers for the life of the page.
+  const _boundElements = new WeakSet();
 
   function bindAudioEvents() {
     const el = audioEl.value;
     if (!el || _isShuttingDown) return;
+    if (_boundElements.has(el)) return;
+    _boundElements.add(el);
     el.addEventListener('play', () => { playing.value = true; });
     el.addEventListener('pause', () => { playing.value = false; });
     el.addEventListener('ended', () => { playing.value = false; telemetry.recordStallEnd(); });
@@ -712,7 +979,7 @@ export function useMseBuffer() {
     for (const entry of entries) {
       if (cache.totalSize <= cache.maxCacheBytes) break;
       if (cache.protectedPool?.has(entry.key)) continue;
-      cache.remove(entry.key);
+      cacheRemove(entry.key);
     }
     telemetry.updateMemoryUsage(cache.totalSize);
   }
@@ -724,9 +991,11 @@ export function useMseBuffer() {
   return {
     playing, bufferedRanges, error, mseSupported, loadProgress, currentTrackId,
     trackDuration, playlist, loopRegion, repeatMode, cacheSize, pendingCount,
+    cachedChunkCount, cachedKeys, pendingKeys, chunkRows, warmedTracks,
     fragments, fragmentCount, needsFallback,
     initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume,
     getCurrentTime, bindAudioEvents, updateBufferedRanges, setCacheLimit, setSpeedCap,
-    warmTrackFragments, nextPlaylistTrackId,
+    setRepeatMode, setPlaylistLoop, playlistLoop,
+    warmTrackFragments, nextPlaylistTrackId, nextTrackId,
   };
 }

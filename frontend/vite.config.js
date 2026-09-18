@@ -14,13 +14,19 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    proxy: {
-      '/api': 'http://localhost:3000',
-      '/audio': 'http://localhost:3000',
-      '/socket.io': {
-        target: 'http://localhost:3000',
-        ws: true,
-      },
-    },
+    // Tunnel/ingress hostnames need explicit allowlisting since Vite 6 (localhost always ok).
+    // The leading dot lets any subdomain of klucsik.hu through, so redeploys under a new
+    // prefix keep working.
+    allowedHosts: ['.klucsik.hu'],
+    // When the dev server itself needs to own :3000, run the API elsewhere and point
+    // BACKEND_URL at it, e.g. BACKEND_URL=http://localhost:3001.
+    proxy: (() => {
+      const backend = process.env.BACKEND_URL || 'http://localhost:3000';
+      return {
+        '/api': backend,
+        '/audio': backend,
+        '/socket.io': { target: backend, ws: true },
+      };
+    })(),
   },
 })

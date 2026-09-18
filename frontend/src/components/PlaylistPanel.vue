@@ -493,14 +493,6 @@ defineExpose({
   margin-top: 8px;
 }
 
-.save-btn {
-  background: #4CAF50 !important;
-}
-
-.save-btn:hover:not(:disabled) {
-  background: #45a049 !important;
-}
-
 /* Dialog Styles */
 .dialog-overlay {
   position: fixed;

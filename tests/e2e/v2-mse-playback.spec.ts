@@ -23,9 +23,17 @@ const PASSWORD = 'e2e-test-password';
 // Any real library works; default to this machine's, which is what the backend uses too.
 const SOURCE_LIBRARY = process.env.E2E_MUSIC_SOURCE || process.env.MUSIC_DIR || '/workspace/music';
 
+// The UI test above leaves its double-clicked track in room-1's `current-playlist-*`
+// collection, which would duplicate the entry this test seeds and make “next track” land on
+// the same song. Room 3 is one of the pre-seeded room playlists (1–5) that no other spec touches.
+const ROOM = 'room-3';
+const PLAYLIST_COLLECTION = `current-playlist-${ROOM}`;
+
 let serverProcess = null;
 let tempDir = null;
 let trackId = null;
+let secondTrackId = null;
+let authToken = null;
 
 function sourceFile() {
   if (process.env.E2E_TRACK) return join(SOURCE_LIBRARY, process.env.E2E_TRACK);
@@ -51,12 +59,34 @@ async function waitForHealth(timeoutMs = 90_000) {
   throw new Error('Backend did not become healthy in time');
 }
 
-async function findTrackId() {
+async function findTrackIds() {
   const body = await (await fetch(`${BASE}/api/tracks?limit=200`)).json();
   const tracks = Array.isArray(body) ? body : body.tracks || [];
-  const playable = tracks.find((track) => /\.(m4a|mp4)$/i.test(track.filepath || ''));
-  if (!playable) throw new Error(`Scanner found no m4a track: ${JSON.stringify(tracks).slice(0, 300)}`);
-  return playable.id;
+  return tracks
+    .filter((track) => /\.(m4a|mp4)$/i.test(track.filepath || ''))
+    .map((track) => track.id)
+    .sort();
+}
+
+async function findTrackId() {
+  const ids = await findTrackIds();
+  if (!ids.length) throw new Error('Scanner found no m4a track');
+  return ids[0];
+}
+
+/** Authenticated JSON call against the fixture backend. */
+async function api(path, { method = 'GET', body } = {}) {
+  const response = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${authToken}`,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(`${method} ${path} → ${response.status}: ${JSON.stringify(payload)}`);
+  return payload;
 }
 
 /** Polls until startup normalisation has produced a fragment index (or times out). */
@@ -224,8 +254,6 @@ test.describe('V2 fragmented-MP4 playback', () => {
   // hook and the browser runs need more than the default 30 s.
   test.describe.configure({ timeout: 180_000 });
 
-  let authToken = null;
-
   async function login() {
     const res = await fetch(`${BASE}/api/auth/login`, {
       method: 'POST',
@@ -242,6 +270,8 @@ test.describe('V2 fragmented-MP4 playback', () => {
     const musicDir = join(tempDir, 'music');
     mkdirSync(musicDir, { recursive: true });
     copyFileSync(sourceFile(), join(musicDir, 'fixture.m4a'));
+    // Auto-advance needs a playlist with a follower, so the library gets two copies.
+    copyFileSync(sourceFile(), join(musicDir, 'fixture-next.m4a'));
 
     const logPath = join(tempDir, 'server.log');
     writeFileSync(logPath, '');
@@ -267,8 +297,11 @@ test.describe('V2 fragmented-MP4 playback', () => {
 
     try {
       await waitForHealth();
-      trackId = await findTrackId();
+      const ids = await findTrackIds();
+      if (ids.length < 2) throw new Error(`Expected two fixture tracks, found ${ids.length}`);
+      [trackId, secondTrackId] = ids;
       await waitForManifest(trackId);
+      await waitForManifest(secondTrackId);
       authToken = await login();
     } catch (error) {
       const log = existsSync(logPath) ? readFileSync(logPath, 'utf8').slice(-3000) : '';
@@ -385,5 +418,272 @@ test.describe('V2 fragmented-MP4 playback', () => {
     sample = sample ?? await progress();
     expect(sample.error, JSON.stringify(sample)).toBeNull();
     expect(sample.buffered).toBeGreaterThan(1);
+  });
+
+  // The room only moves on because a client reports “this track ended”, so a player that never
+  // sends it strands the playlist after one song. Prove the whole loop over a real socket.
+  test('hands the room to the next track when the current one ends', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'one engine proves the wiring');
+    expect(trackId && secondTrackId, 'fixture backend unavailable').toBeTruthy();
+
+    const consoleLog = [];
+    page.on('console', (message) => consoleLog.push(`${message.type()}: ${message.text()}`));
+    page.on('pageerror', (error) => consoleLog.push(`pageerror: ${error.message}`));
+
+    // Build the playlist and start the first item before the browser connects: the player has
+    // to recover the room state from `state_sync` and then follow it to the end.
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'DELETE' });
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'POST', body: { track_id: trackId } });
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'POST', body: { track_id: secondTrackId } });
+    await api('/api/playback/play', {
+      method: 'POST',
+      body: { trackId, roomId: ROOM, startPosition: 0, playlistIndex: 0 },
+    });
+
+    await page.addInitScript(({ token, room }) => {
+      localStorage.setItem('muzsikapp-player-mode', 'v2');
+      localStorage.setItem('auth_token', token);
+      localStorage.setItem('rpg-music-room-id', room);
+    }, { token: authToken, room: ROOM });
+    await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
+
+    const sample = () => page.evaluate(() => {
+      const audio = document.querySelector('audio');
+      if (!audio) return null;
+      return {
+        src: audio.src.slice(0, 5),
+        currentTime: Number(audio.currentTime.toFixed(2)),
+        duration: audio.duration,
+        paused: audio.paused,
+        error: audio.error ? audio.error.code : null,
+      };
+    });
+
+    try {
+      // 1. the player picks the room's track up. Chromium refuses to start audio until the
+      //    document has a gesture, so act like a listener would — which also proves the control
+      //    goes through the server rather than only toggling the element. When the browser
+      //    blocked autoplay the player shows its unlock overlay, and dismissing that overlay
+      //    already resumes playback: pressing play on top of that would pause the whole room.
+      const overlay = page.locator('.audio-unlock-overlay');
+      const playButton = page.locator('.control-btn.play-pause');
+      await playButton.waitFor({ timeout: 25_000 });
+
+      let current = null;
+      await expect
+        .poll(async () => {
+          // An autoplay rejection can land at any point; the overlay click is the gesture.
+          if (await overlay.isVisible().catch(() => false)) {
+            await overlay.click();
+            return false;
+          }
+          current = await sample();
+          // Only press play while the element really is paused, then give the server's resume
+          // broadcast a moment to land before judging again — a second click would toggle off.
+          if (current?.src === 'blob:' && current.paused) {
+            await playButton.click();
+            await page.waitForTimeout(1500);
+            return false;
+          }
+          return current?.src === 'blob:' && !current.paused && current.currentTime > 0.3;
+        }, { timeout: 40_000, message: 'V2 player never started the room track' })
+        .toBe(true);
+
+      // 2. jump to the tail through the real progress bar — nobody wants to watch a whole track
+      const seekTo = Math.max(1, current.duration - 4);
+      const bar = await page.locator('.progress-bar').boundingBox();
+      // A bar squeezed to zero height by the flex layout swallows the double click and the seek
+      // below silently does nothing, so fail here with a message that says so.
+      expect(bar && bar.height > 4, 'progress bar is too short to click').toBe(true);
+      await page.mouse.dblclick(bar.x + bar.width * (seekTo / current.duration), bar.y + bar.height / 2);
+      await expect
+        .poll(async () => {
+          const now = await sample();
+          return !!now && now.currentTime >= seekTo - 2;
+        }, { timeout: 20_000, message: 'seek to the tail never landed' })
+        .toBe(true);
+
+      // 3. ending the track has to move the room…
+      await expect
+        .poll(async () => (await api(`/api/playback/state?roomId=${ROOM}`))?.currentTrack?.id, {
+          timeout: 90_000,
+          message: 'server never advanced to the next track',
+        })
+        .toBe(secondTrackId);
+
+      // …and the player has to actually play the follower, from the beginning
+      await expect
+        .poll(async () => {
+          const now = await sample();
+          return !!now && !now.paused && now.currentTime > 0.3 && now.currentTime < 30;
+        }, { timeout: 40_000, message: 'next track never started playing in the V2 player' })
+        .toBe(true);
+    } finally {
+      if (process.env.E2E_REPORT_DIR) {
+        writeFileSync(join(process.env.E2E_REPORT_DIR, 'v2-mse-autonext.log'), consoleLog.join('\n'));
+      }
+    }
+  });
+
+  // Looping is decided by a room flag, and that flag is the only thing that makes the first
+  // item follow the last one. Switching it has to re-plan the prefetch immediately: waiting for
+  // the transition would mean the first song of the second lap starts from a cold cache.
+  test('pre-buffers the first track when the playlist loop is switched on the last item', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'one engine proves the wiring');
+    expect(trackId && secondTrackId, 'fixture backend unavailable').toBeTruthy();
+
+    // Warming asks for the target's manifest before any byte-range request, so the request
+    // stream is the observable signal.
+    const manifested = new Set();
+    page.on('request', (request) => {
+      const match = /\/audio\/([0-9a-fA-F-]+)\/manifest/.exec(request.url());
+      if (match) manifested.add(match[1]);
+    });
+    const consoleLog = [];
+    page.on('console', (message) => consoleLog.push(`${message.type()}: ${message.text()}`));
+    page.on('pageerror', (error) => consoleLog.push(`pageerror: ${error.message}`));
+
+    const loopButton = page.locator('button.loop-btn');
+    const attached = () => page.evaluate(() => !!document.querySelector('audio')?.src.startsWith('blob:'));
+
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'DELETE' });
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'POST', body: { track_id: trackId } });
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'POST', body: { track_id: secondTrackId } });
+    // Start on the *last* item: while the playlist does not loop, nothing follows it.
+    await api('/api/playback/play', {
+      method: 'POST',
+      body: { trackId: secondTrackId, roomId: ROOM, startPosition: 0, playlistIndex: 1 },
+    });
+
+    await page.addInitScript(({ token, room }) => {
+      localStorage.setItem('muzsikapp-player-mode', 'v2');
+      localStorage.setItem('auth_token', token);
+      localStorage.setItem('rpg-music-room-id', room);
+      // The fragment inventory lives in the settings panel; open it from the start.
+      localStorage.setItem('muzsikapp-settings-panel-open', 'true');
+    }, { token: authToken, room: ROOM });
+    await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
+
+    try {
+      await loopButton.waitFor({ timeout: 25_000 });
+      // The room flag survives between runs and /api/playback/loop only toggles, so walk it to
+      // Off, then reload: warming caches in the page, and a warm from the walk would otherwise
+      // hide the very request this test waits for.
+      if ((await loopButton.getAttribute('title')) !== 'Loop Playlist: Off') {
+        await loopButton.click();
+        await expect(loopButton).toHaveAttribute('title', 'Loop Playlist: Off', { timeout: 10_000 });
+        await page.reload({ waitUntil: 'networkidle' });
+        await loopButton.waitFor({ timeout: 25_000 });
+      }
+      expect((await loopButton.getAttribute('title'))).toBe('Loop Playlist: Off');
+      // The request Set spans the reload above, so it still holds the manifest the page asked
+      // for while the room's (leaked) loop flag was on. Reading it now would blame this test's
+      // warm for a request made before the loop was switched off.
+      manifested.clear();
+
+      await expect
+        .poll(async () => page.evaluate(() => document.querySelector('audio')?.src.startsWith('blob:')), {
+          timeout: 30_000,
+          message: 'V2 player never attached the room track',
+        })
+        .toBe(true);
+      expect(manifested.has(trackId), 'nothing after the last track until the loop is on').toBe(false);
+
+      await loopButton.click();
+      await expect(loopButton).toHaveAttribute('title', 'Loop Playlist: On', { timeout: 10_000 });
+
+      await expect
+        .poll(() => manifested.has(trackId), {
+          timeout: 20_000,
+          message: 'the first track was never warmed for the wrap-around',
+        })
+        .toBe(true);
+
+      // The fragment inventory moved into the settings panel, which also names the next track.
+      await expect(page.locator('.fragment-table tbody tr').first()).toBeVisible({ timeout: 10_000 });
+      await expect(page.locator('.fragment-next')).toContainText('next:', { timeout: 10_000 });
+      await expect(page.locator('.fragment-warmed-title')).toBeVisible({ timeout: 10_000 });
+    } finally {
+      // The app's console is the only useful trace when the prefetch never happens.
+      if (process.env.E2E_REPORT_DIR) {
+        writeFileSync(join(process.env.E2E_REPORT_DIR, 'v2-mse-loopwarm.log'), consoleLog.join('\n'));
+      }
+    }
+  });
+
+  // Chromium caps how many SourceBuffer objects one page may hold, so a teardown that leaves one
+  // attached to its MediaSource turns the Nth track change into “addSourceBuffer … reached the
+  // limit of SourceBuffer objects” and a dead player with empty buffer bars.
+  test('survives repeated track changes without exhausting MediaSource', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'the SourceBuffer budget is a Chromium limit');
+    expect(trackId && secondTrackId, 'fixture backend unavailable').toBeTruthy();
+
+    const problems: string[] = [];
+    page.on('console', (message) => {
+      if (/SourceBuffer objects|addSourceBuffer|SourceBuffer error/i.test(message.text())) {
+        problems.push(message.text());
+      }
+    });
+    page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
+
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'DELETE' });
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'POST', body: { track_id: trackId } });
+    await api(`/api/collections/${PLAYLIST_COLLECTION}/tracks`, { method: 'POST', body: { track_id: secondTrackId } });
+
+    await page.addInitScript(({ token, room }) => {
+      localStorage.setItem('muzsikapp-player-mode', 'v2');
+      localStorage.setItem('auth_token', token);
+      localStorage.setItem('rpg-music-room-id', room);
+      // Count the objects rather than waiting for the browser to run out: the cap depends on the
+      // machine, the leak does not.
+      (window as any).__sb = { added: 0, removed: 0 };
+      const proto = MediaSource.prototype;
+      const add = proto.addSourceBuffer;
+      const drop = proto.removeSourceBuffer;
+      proto.addSourceBuffer = function (...args) { (window as any).__sb.added++; return add.apply(this, args); };
+      proto.removeSourceBuffer = function (...args) { (window as any).__sb.removed++; return drop.apply(this, args); };
+    }, { token: authToken, room: ROOM });
+    await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
+
+    const playing = () => page.evaluate(async () => {
+      const audio = document.querySelector('audio');
+      if (!audio || !audio.src.startsWith('blob:')) return false;
+      const before = audio.currentTime;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 600));
+      return audio.currentTime > before + 0.2;
+    });
+
+    try {
+      for (let i = 0; i < 5; i++) {
+        const target = i % 2 === 0 ? trackId : secondTrackId;
+        await api('/api/playback/play', {
+          method: 'POST', body: { trackId: target, roomId: ROOM, startPosition: 0 },
+        });
+        await expect.poll(playing, { timeout: 25_000, message: `switch ${i + 1} never played` }).toBe(true);
+
+        if (i === 4) {
+          // Park the playhead on the final frames and let the room pause there. The pause
+          // broadcast carries that position back, and honouring it used to reopen the tail of a
+          // stream the browser had already closed.
+          const tail = await page.evaluate(() => document.querySelector('audio')?.duration ?? 0);
+          await api('/api/playback/seek', { method: 'POST', body: { position: tail - 0.2, roomId: ROOM } });
+          await api('/api/playback/pause', { method: 'POST', body: { roomId: ROOM } });
+          await api('/api/playback/play', {
+            method: 'POST', body: { trackId: target, roomId: ROOM, startPosition: 0 },
+          });
+          await expect.poll(playing, { timeout: 25_000, message: 'playback never recovered' }).toBe(true);
+        }
+      }
+      expect(problems, problems.join('\n')).toEqual([]);
+
+      // One SourceBuffer may still be live (the track that is playing); anything else leaked.
+      const counts = await page.evaluate(() => (window as any).__sb);
+      expect(counts.added, JSON.stringify(counts)).toBeGreaterThanOrEqual(3);
+      expect(counts.added - counts.removed, JSON.stringify(counts)).toBeLessThanOrEqual(1);
+    } finally {
+      if (process.env.E2E_REPORT_DIR) {
+        writeFileSync(join(process.env.E2E_REPORT_DIR, 'v2-mse-churn.log'), problems.join('\n'));
+      }
+    }
   });
 });

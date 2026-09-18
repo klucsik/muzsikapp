@@ -60,6 +60,11 @@ class SyncController {
           duration: track.duration,
           startPosition,
           scheduledStartTime,
+          // Loop points belong to the track being started, so the room is told what they are at
+          // the same moment it is told what is playing. Read after `roomState.playTrack()`, which
+          // clears a region left over from a different track.
+          loopStart: roomState.loopStart,
+          loopEnd: roomState.loopEnd,
           serverTimestamp: Date.now(),
           roomId,
         },

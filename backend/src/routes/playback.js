@@ -197,7 +197,8 @@ router.post('/loop-points', (req, res) => {
   try {
     const { loopStart, loopEnd, roomId = 'room-1' } = req.body;
 
-    if (typeof loopStart !== 'number' || typeof loopEnd !== 'number') {
+    // `typeof NaN === 'number'`, and a NaN region poisons every position check in the room.
+    if (!Number.isFinite(loopStart) || !Number.isFinite(loopEnd)) {
       return res.status(400).json({
         error: 'Invalid loop points: both loopStart and loopEnd must be numbers',
       });

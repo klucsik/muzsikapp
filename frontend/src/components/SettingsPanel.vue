@@ -121,6 +121,45 @@
             </template>
           </div>
         </div>
+        <!-- Fragment inventory (MSE) -->
+        <div v-if="fragmentRows.length || nextTrackLabel" class="metric-row fragment-block">
+          <label>
+            Fragments
+            <span v-if="nextTrackLabel" class="fragment-next">next: {{ nextTrackLabel }}</span>
+          </label>
+          <div v-if="!fragmentRows.length" class="fragment-empty">No fragment table yet — play a track.</div>
+          <table v-else class="fragment-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th class="fragment-range">Range</th>
+                <th class="fragment-size">Size</th>
+                <th class="fragment-state">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in fragmentRows"
+                :key="row.index"
+                :class="['fragment-row', row.state, { current: row.current }]"
+              >
+                <td>{{ row.index }}</td>
+                <td class="fragment-range">{{ row.time }}</td>
+                <td class="fragment-size">{{ row.size }}</td>
+                <td class="fragment-state">{{ row.state }}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div v-if="warmedTracks.length" class="fragment-warmed">
+            <div class="fragment-warmed-title">Warmed for next track</div>
+            <div v-for="track in warmedTracks" :key="track.trackId" class="fragment-warmed-row">
+              <span class="fragment-warmed-id">{{ track.name }}</span>
+              <span>{{ track.label }}</span>
+              <span class="fragment-size">{{ track.size }}</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -150,6 +189,9 @@ const props = defineProps({
   trackTotalSize:  { type: Number, default: 0 },
   trackLoadedBytes:{ type: Number, default: 0 },
   avgSpeed:        { type: Number, default: 0 },
+  fragmentRows:    { type: Array,  default: () => [] },
+  warmedTracks:    { type: Array,  default: () => [] },
+  nextTrackLabel:  { type: String, default: '' },
 });
 
 const emit = defineEmits([
@@ -235,6 +277,12 @@ const sparkPoints = computed(() => {
     const y = height - ((p.value / maxVal) * height);
     return { x: Math.round(x), y: Math.round(y) };
   });
+});
+
+// Grid lines only make sense once the sparkline has a scale.
+const sparkMax = computed(() => {
+  const data = (props.speedHistory || []).filter((p) => Date.now() - p.timestamp < 60000);
+  return data.length ? Math.max(...data.map((p) => p.value)) : 0;
 });
 
 const sparkPointsStr = computed(() => {
@@ -558,5 +606,88 @@ defineExpose({ isOpen, togglePanel });
     flex-direction: column;
     gap: 12px;
   }
+}
+
+/* ── Fragment inventory ───────────────────────────────────────── */
+
+.fragment-block {
+  display: block;
+}
+
+.fragment-next {
+  float: right;
+  color: #6f6f6f;
+  font-weight: 400;
+  font-size: 0.85em;
+}
+
+.fragment-empty {
+  color: #6f6f6f;
+  font-size: 0.75em;
+}
+
+.fragment-table {
+  width: 100%;
+  margin-top: 4px;
+  border-collapse: collapse;
+  font-size: 0.72em;
+  color: #bdbdbd;
+}
+
+.fragment-table th {
+  text-align: left;
+  color: #777;
+  font-weight: 600;
+  padding: 2px 4px;
+  border-bottom: 1px solid #333;
+}
+
+.fragment-table td {
+  padding: 2px 4px;
+  border-bottom: 1px solid #232323;
+}
+
+.fragment-range,
+.fragment-size {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.fragment-state {
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.fragment-row.cached .fragment-state { color: #4CAF50; }
+.fragment-row.downloading .fragment-state { color: #2196F3; }
+.fragment-row.missing .fragment-state { color: #616161; }
+
+.fragment-row.current {
+  background: rgba(76, 175, 80, 0.12);
+}
+
+.fragment-warmed {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #333;
+  font-size: 0.72em;
+}
+
+.fragment-warmed-title {
+  color: #777;
+  margin-bottom: 3px;
+}
+
+.fragment-warmed-row {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  color: #9e9e9e;
+}
+
+.fragment-warmed-id {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
