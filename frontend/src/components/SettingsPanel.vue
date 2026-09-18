@@ -300,6 +300,10 @@ defineExpose({ isOpen, togglePanel });
 
 .settings-section {
   flex: 1;
+  /* A flex column only shrinks to its widest min-content by default, and a range input plus its
+     value label is wider than half the panel — so this column shoved the right one out through
+     the panel's `overflow: hidden`. */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -322,6 +326,7 @@ defineExpose({ isOpen, togglePanel });
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .setting-row label,
@@ -331,7 +336,8 @@ defineExpose({ isOpen, togglePanel });
 }
 
 .setting-row > label {
-  flex: 0 0 84px;
+  flex: 0 0 74px;
+  white-space: nowrap;
 }
 
 .metric-row > label {
@@ -343,10 +349,12 @@ defineExpose({ isOpen, togglePanel });
   align-items: center;
   gap: 8px;
   flex: 1;
+  min-width: 0;
 }
 
 .setting-slider {
   flex: 1;
+  min-width: 0;
   height: 6px;
   border-radius: 3px;
   background: #1a1a1a;
@@ -367,12 +375,14 @@ defineExpose({ isOpen, togglePanel });
 .slider-value {
   font-size: 0.72em;
   color: #e0e0e0;
-  min-width: 44px;
+  flex: 0 0 auto;
+  min-width: 40px;
   text-align: right;
 }
 
 /* Speed cap */
 .speed-select {
+  min-width: 0;
   background: #1a1a1a;
   border: 1px solid #444;
   border-radius: 4px;
@@ -407,6 +417,7 @@ defineExpose({ isOpen, togglePanel });
 
 .telemetry-section {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -416,11 +427,14 @@ defineExpose({ isOpen, togglePanel });
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .stat-row {
   gap: 5px;
   font-size: 0.72em;
+  flex-wrap: wrap;
+  row-gap: 2px;
 }
 
 .stat-label {
@@ -438,6 +452,7 @@ defineExpose({ isOpen, togglePanel });
 /* Memory bar */
 .memory-bar {
   flex: 1;
+  min-width: 0;
   height: 16px;
   background: #1a1a1a;
   border-radius: 4px;
@@ -469,6 +484,7 @@ defineExpose({ isOpen, togglePanel });
 /* Sparkline */
 .sparkline {
   flex: 1;
+  min-width: 0;
   height: 30px;
 }
 
@@ -488,6 +504,7 @@ defineExpose({ isOpen, togglePanel });
 /* Track progress */
 .track-progress-bar {
   flex: 1;
+  min-width: 0;
   height: 10px;
   background: #1a1a1a;
   border-radius: 3px;
