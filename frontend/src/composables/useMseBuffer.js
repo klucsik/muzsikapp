@@ -171,6 +171,30 @@ export function useMseBuffer() {
     return [...byTrack.values()];
   });
 
+  /**
+   * How much of each track this client already holds, for the cache strip on the track list. Keyed
+   * by track id: `{ cached, total, bytes }`, where `cached` counts fragments (the init segment is
+   * overhead, not audio) and `total` comes from the manifest. A track whose manifest was never
+   * fetched gets `total: 0` so the caller can leave it blank instead of drawing a misleading 0%.
+   */
+  const cacheCoverage = computed(() => {
+    void cacheVersion.value;
+    const byTrack = {};
+    for (const [key, entry] of cache.cacheMap) {
+      const match = CACHE_KEY_RE.exec(key);
+      if (!match) continue;
+      const [, trackId, suffix] = match;
+      const record = byTrack[trackId] || (byTrack[trackId] = {
+        cached: 0,
+        total: _manifests.get(trackId)?.fragmentCount || _manifests.get(trackId)?.fragments?.length || 0,
+        bytes: 0,
+      });
+      if (suffix !== 'init') record.cached += 1;
+      record.bytes += entry.buffer.byteLength;
+    }
+    return byTrack;
+  });
+
   let _speedCapBytesPerSec = 0; // 0 = unlimited
   let _abortController = null;
   let _sequentialFetchInFlight = false;
@@ -991,7 +1015,7 @@ export function useMseBuffer() {
   return {
     playing, bufferedRanges, error, mseSupported, loadProgress, currentTrackId,
     trackDuration, playlist, loopRegion, repeatMode, cacheSize, pendingCount,
-    cachedChunkCount, cachedKeys, pendingKeys, chunkRows, warmedTracks,
+    cachedChunkCount, cachedKeys, pendingKeys, chunkRows, warmedTracks, cacheCoverage,
     fragments, fragmentCount, needsFallback,
     initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume,
     getCurrentTime, bindAudioEvents, updateBufferedRanges, setCacheLimit, setSpeedCap,

@@ -189,7 +189,7 @@ const props = defineProps({
   hasPrevious: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(['next-track', 'previous-track', 'fallback-v1']);
+const emit = defineEmits(['next-track', 'previous-track', 'fallback-v1', 'cache-progress']);
 
 // ── MSE Buffer Composable ────────────────────────────────────────
 
@@ -663,6 +663,14 @@ watch(
       emit('fallback-v1');
     }
   },
+);
+
+// The queue draws a cache strip per track. Coverage moves with every fragment that lands, so
+// coalesce the burst — the list only needs to redraw a few times a second.
+watch(
+  () => mse.cacheCoverage.value,
+  (coverage) => emit('cache-progress', coverage),
+  { immediate: true, throttle: 250 },
 );
 
 watch(

@@ -162,6 +162,20 @@ describe('next-track warming', () => {
       { trackId: uuid, init: true, chunks: 1, bytes: 128 },
     ]);
   });
+
+  it('reports per-track coverage for the cache strip on the track list', async () => {
+    installFetch();
+    const uuid = '7fd106c7-bdd0-4486-bb70-af763ec87254';
+
+    expect(mse.cacheCoverage.value).toEqual({});
+    await mse.warmTrackFragments(uuid, 1);
+
+    // `total` comes from the manifest the warm just fetched; `cached` counts fragments only, so
+    // the init segment cannot inflate a track to look further along than it is.
+    expect(mse.cacheCoverage.value).toEqual({
+      [uuid]: { cached: 1, total: MANIFEST.fragments.length, bytes: 128 },
+    });
+  });
 });
 
 

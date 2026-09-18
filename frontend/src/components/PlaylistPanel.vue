@@ -9,6 +9,7 @@
       :show-position="true"
       :enable-double-click="true"
       :enable-single-click="false"
+      :cache-coverage="cacheCoverage"
       @track-dblclick="handleTrackDoubleClick"
       @track-remove="handleRemoveTrack"
       @track-reorder="handleReorderTrack"
@@ -115,6 +116,11 @@ const props = defineProps({
   isAuthenticated: {
     type: Boolean,
     default: false
+  },
+  // Passed straight to the list rows as a cache strip; see OrderedTrackList.
+  cacheCoverage: {
+    type: Object,
+    default: () => ({})
   }
 });
 

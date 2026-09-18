@@ -60,6 +60,7 @@
             @next-track="playNextTrack"
             @previous-track="playPreviousTrack"
             @fallback-v1="setPlayerMode('v1')"
+            @cache-progress="onCacheProgress"
           />
         </div>
 
@@ -69,6 +70,7 @@
             ref="playlistRef"
             :current-track="currentTrack"
             :is-authenticated="isAuthenticated"
+            :cache-coverage="cacheCoverage"
             @track-play="onPlayTrack"
           />
         </div>
@@ -82,6 +84,7 @@
             ref="libraryRef"
             :current-track="currentTrack"
             :is-authenticated="isAuthenticated"
+            :cache-coverage="cacheCoverage"
             @track-play="onAddTrackAndPlay"
             @open-manage-library="openManageLibrary"
           />
@@ -159,6 +162,12 @@ export default {
 
     const currentTrackId = ref(null);
     const currentTrack = ref(null);
+    // Fragment coverage reported by the V2 player, `{ [trackId]: { cached, total, bytes } }`.
+    // The lists draw a cache strip from it; V1 never emits, so it stays empty there.
+    const cacheCoverage = ref({});
+    const onCacheProgress = (coverage) => {
+      cacheCoverage.value = coverage;
+    };
     // Mirror of the playlist panel's tracks, so the V2 player can warm the next track.
     const playlistTracks = ref([]);
     // Load saved room from localStorage or default to 'room-1'
@@ -455,6 +464,8 @@ export default {
     return {
       playerMode,
       setPlayerMode,
+      cacheCoverage,
+      onCacheProgress,
       playlistTracks,
       currentTrackId,
       currentTrack,

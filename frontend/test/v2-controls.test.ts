@@ -65,6 +65,7 @@ vi.mock('../src/composables/useMseBuffer.js', async () => {
     cachedChunkCount: ref(0),
     pendingCount: ref(0),
     warmedTracks: ref([]),
+    cacheCoverage: ref({}),
     loadProgress: ref(1),
     currentTrackId: ref(null),
     playlist: ref([]),
@@ -136,6 +137,7 @@ describe('AudioPlayerV2 controls', () => {
     mse.repeatMode.value = 'none';
     mse.loopRegion.value = null;
     mse.currentTrackId.value = null;
+    mse.cacheCoverage.value = {};
     mse.getCurrentTime.mockReturnValue(0);
   });
 
@@ -284,6 +286,19 @@ describe('AudioPlayerV2 controls', () => {
 
     await vi.advanceTimersByTimeAsync(300);
     expect(h.websocket.reportTrackEnded).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('hands cache coverage up to the app so the queue can draw its strips', async () => {
+    const wrapper = await mountPlayer();
+
+    mse.cacheCoverage.value = { t1: { cached: 1, total: 4, bytes: 1024 } };
+    // Coverage moves with every fragment, so the emit is coalesced rather than per chunk.
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(wrapper.emitted('cache-progress')?.at(-1)?.[0]).toEqual({
+      t1: { cached: 1, total: 4, bytes: 1024 },
+    });
     wrapper.unmount();
   });
 
