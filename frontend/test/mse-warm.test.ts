@@ -176,6 +176,42 @@ describe('next-track warming', () => {
       [uuid]: { cached: 1, total: MANIFEST.fragments.length, bytes: 128 },
     });
   });
+
+  it('walks coverage back down when the cache limit drops', async () => {
+    installFetch();
+    const uuid = '7fd106c7-bdd0-4486-bb70-af763ec87254';
+
+    await mse.warmTrackFragments(uuid, 2); // init + 2 fragments = 192 bytes
+    expect(mse.cacheCoverage.value[uuid]).toMatchObject({ cached: 2, bytes: 192 });
+
+    // Oldest first: the init segment goes, and it is not counted as audio progress anyway.
+    mse.setCacheLimit(128);
+    expect(mse.cacheCoverage.value[uuid]).toMatchObject({ cached: 2, bytes: 128 });
+
+    mse.setCacheLimit(64);
+    expect(mse.cacheCoverage.value[uuid]).toMatchObject({ cached: 1, bytes: 64 });
+
+    // Down to nothing held — the track leaves the map entirely, so the row draws no strip
+    // instead of freezing at whatever width it had.
+    mse.setCacheLimit(1);
+    expect(mse.cacheCoverage.value[uuid]).toBeUndefined();
+    expect(mse.cachedChunkCount.value).toBe(0);
+  });
+
+  it('drops coverage of an older track when a newer one evicts it', async () => {
+    installFetch();
+    const first = '7fd106c7-bdd0-4486-bb70-af763ec87254';
+    const second = '11111111-2222-4333-8444-555555555555';
+
+    await mse.warmTrackFragments(first, 1); // 128 bytes
+    mse.setCacheLimit(160); // barely room for one warmed track
+
+    await mse.warmTrackFragments(second, 1);
+
+    expect(mse.cacheCoverage.value[second]).toMatchObject({ cached: 1, total: 3 });
+    expect(mse.cacheCoverage.value[first]).toBeUndefined();
+    expect(mse.cachedChunkCount.value).toBe(2); // init + 1 fragment of the newer track
+  });
 });
 
 

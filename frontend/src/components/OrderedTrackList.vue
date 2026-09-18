@@ -106,11 +106,10 @@
           ×
         </button>
 
-        <!-- How much of this track the browser already holds (V2 fragment cache) -->
+        <!-- How much of this track the browser still holds; shrinks back when bytes are evicted -->
         <div
           v-if="cacheBars[index]"
           class="cache-progress"
-          :class="{ complete: cacheBars[index].complete }"
           :style="{ width: cacheBars[index].width }"
           :title="cacheBars[index].title"
         ></div>
@@ -198,7 +197,6 @@ const cacheBars = computed(() => props.tracks.map((track) => {
   const mb = (info.bytes / 1048576).toFixed(1);
   return {
     width: `${percent}%`,
-    complete: percent >= 100,
     title: `${info.cached}/${info.total} fragments cached (${mb} MB)`,
   };
 }));
@@ -504,7 +502,8 @@ const handleContainerDrop = (event) => {
 }
 
 /* Cache coverage along the bottom edge: the same grey the seek bar uses for buffered audio, so
-   "bytes I already have" looks the same in both places. Green once the whole track is local. */
+   "bytes I already have" looks the same in both places. One colour is enough — a full strip is a
+   full strip. */
 .cache-progress {
   position: absolute;
   left: 0;
@@ -514,10 +513,6 @@ const handleContainerDrop = (event) => {
   border-radius: 0 2px 2px 0;
   pointer-events: none;
   transition: width 0.3s ease;
-}
-
-.cache-progress.complete {
-  background: rgba(76, 175, 80, 0.75);
 }
 
 .track-item.dragging {

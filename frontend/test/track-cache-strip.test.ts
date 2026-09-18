@@ -29,16 +29,25 @@ describe('track list cache strip', () => {
     expect(bar.classes()).not.toContain('complete');
   });
 
-  it('turns green once a track is fully local, and never overshoots 100%', () => {
+  it('fills the strip at 100% and never overshoots it', () => {
     const bars = mountList({
       a: { cached: 8, total: 8, bytes: 8 * MB },
       b: { cached: 9, total: 8, bytes: 9 * MB }, // init segment counted in by a careless caller
     }).findAll('.cache-progress');
 
     expect(bars).toHaveLength(2);
-    expect(bars[0].classes()).toContain('complete');
-    expect(bars[1].attributes('style')).toContain('width: 100%');
-    expect(bars[1].classes()).toContain('complete');
+    for (const bar of bars) expect(bar.attributes('style')).toContain('width: 100%');
+  });
+
+  it('walks back down as the cache evicts bytes, and vanishes with the last of them', async () => {
+    const wrapper = mountList({ a: { cached: 4, total: 8, bytes: 4 * MB } });
+
+    await wrapper.setProps({ cacheCoverage: { a: { cached: 1, total: 8, bytes: MB } } });
+    expect(wrapper.find('.cache-progress').attributes('style')).toContain('width: 13%');
+
+    // Nothing held any more: no strip rather than a strip frozen at its old width.
+    await wrapper.setProps({ cacheCoverage: {} });
+    expect(wrapper.findAll('.cache-progress')).toHaveLength(0);
   });
 
   it('draws nothing without a fragment count, so a V1 library stays blank', () => {
