@@ -161,6 +161,7 @@
 
     <!-- Settings & Telemetry Panel -->
     <SettingsPanel
+      :cache-mode="cacheMode"
       :used-memory="telemetryData.usedMemory"
       :total-memory="telemetryData.totalMemory"
       :speed-history="telemetryData.speedHistory"
@@ -169,6 +170,7 @@
       :cached-chunks="cachedChunkCount"
       :downloading-count="mse.pendingCount.value || 0"
       @update-cache-limit="onUpdateCacheLimit"
+      @update-cache-mode="onUpdateCacheMode"
       @update-speed-cap="onUpdateSpeedCap"
     />
   </div>
@@ -177,6 +179,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { planCacheBlocks, useMseBuffer, isMseAacSupported } from '../composables/useMseBuffer.js';
+import { CACHE_SETTINGS_KEY, normalizeCacheMode } from '../services/cachePolicy.js';
 import SettingsPanel from './SettingsPanel.vue';
 import api from '../services/api';
 import websocket from '../services/websocket';
@@ -220,6 +223,32 @@ function onUpdateCacheLimit(bytes) {
 
 function onUpdateSpeedCap(bytesPerSec) {
   mse.setSpeedCap(bytesPerSec);
+}
+
+// ── Persisted player settings ─────────────────────────────────
+// One JSON blob rather than a key per control, so the next setting costs a field. Cache size and
+// the download cap stay session-scoped on purpose: both are stress-test dials, and a value left
+// over from last week's experiment reads like a broken player.
+
+function readPlayerSettings() {
+  try {
+    return JSON.parse(localStorage.getItem(CACHE_SETTINGS_KEY)) || {};
+  } catch (_) {
+    return {}; // a hand-edited or half-written blob must not take the player down
+  }
+}
+
+function writePlayerSettings(patch) {
+  localStorage.setItem(CACHE_SETTINGS_KEY, JSON.stringify({ ...readPlayerSettings(), ...patch }));
+}
+
+const cacheMode = ref(normalizeCacheMode(readPlayerSettings().cacheMode));
+
+function onUpdateCacheMode(mode) {
+  const next = normalizeCacheMode(mode);
+  cacheMode.value = next;
+  writePlayerSettings({ cacheMode: next });
+  mse.setCacheMode(next);
 }
 
 // ── Local State ──────────────────────────────────────────────────
@@ -911,6 +940,10 @@ onMounted(async () => {
   if (!supported) {
     warn('MSE with AAC not supported — consider V1 fallback');
   }
+
+  // The saved aggressiveness has to reach the buffer before the first track loads, or a hard-mode
+  // listener gets soft behaviour until they touch the panel again.
+  mse.setCacheMode(cacheMode.value);
 
   // Start time update loop
   startTimeUpdates();

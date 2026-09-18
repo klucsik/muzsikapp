@@ -10,6 +10,10 @@
 import { ref, computed, watch, toRaw } from 'vue';
 import api from '../services/api';
 import { ChunkCache } from '../services/chunkCache.js';
+import {
+  CACHE_KEY_RE, DEFAULT_CACHE_MODE, RANK_AHEAD,
+  evictionRank, normalizeCacheMode, planCacheFill, playlistTrackIds, upcomingTrackIds,
+} from '../services/cachePolicy.js';
 import { predictNextChunks, CHUNK_DURATION } from '../services/prefetchPredictor.js';
 import { telemetry } from './useTelemetry.js';
 
@@ -26,10 +30,12 @@ const PREFETCH_INTERVAL_MS = 5000;
 // chain walks to the end of the track and downloads a 60-minute file on the first click.
 const PREFETCH_LOOKAHEAD_SEC = 90;
 const MAX_APPEND_RETRIES = 2;
+// Manifests one hard-mode fill pass may go looking for. A manifest is a small JSON request, but a
+// queue can be thousands of items long and the walk only ever needs the slice the budget holds.
+const MANIFEST_HORIZON = 2;
 
-// Cache keys are `${trackId}-${index}` (or `-init`). Track ids are UUIDs containing dashes,
-// so the suffix has to be anchored: the id is everything before the *last* dash.
-const CACHE_KEY_RE = /^(.+)-(init|\d+)$/;
+// Cache keys (`${trackId}-${index}`, `-init` for the init segment) and the aggressiveness policy
+// built on them live in services/cachePolicy.js.
 
 /** Spans of `spans` not covered by `holes`; both are {start,end} lists in seconds. */
 function subtractSpans(spans, holes) {
@@ -128,6 +134,12 @@ export function useMseBuffer() {
   // The room's 🔄 Loop Playlist flag. Separate from the repeat button: it repeats the queue,
   // so it is what makes the first track the successor of the last one.
   const playlistLoop = ref(false);
+  /**
+   * Cache aggressiveness, from the settings panel: 'soft' keeps a window of the next few chunks,
+   * 'hard' spends the whole byte budget on the current track plus the queue. See cachePolicy.js.
+   * @type {{ value: 'soft'|'hard' }}
+   */
+  const cacheMode = ref(DEFAULT_CACHE_MODE);
 
   const playing = ref(false);
   /** @type {{ value: Array<{ start: number, end: number }> }} plain snapshots of element.buffered */
@@ -616,6 +628,7 @@ export function useMseBuffer() {
   const NEXT_TRACK_FRAGMENTS = 2;
   const _manifests = new Map(); // trackId -> manifest, also reused by loadTrack
   const _warmInFlight = new Set(); // trackIds with a warm already running (the ticker fires every 5s)
+  let _fillInFlight = false; // one cache fill at a time; it can outlast several ticker passes
 
   /** Server repeat is a boolean meaning “replay the current track”, which maps to 'one'. */
   /** 🔄 Loop Playlist, as broadcast by the room (`loop_mode_change` / `state_sync`). */
@@ -643,6 +656,32 @@ export function useMseBuffer() {
     return trackIdOf(list[next]);
   }
 
+  /**
+   * Pull one byte range into the cache without touching the SourceBuffer, telemetry included.
+   * `item` is `{ key, trackId, offset, size }`, i.e. what `planCacheFill` returns.
+   */
+  async function fetchIntoCache(item) {
+    const url = item.trackId && item.trackId !== currentTrackId.value
+      ? api.getAudioUrl(item.trackId)
+      : _audioBaseUrl;
+    markPending(item.key);
+    const startedAt = performance.now();
+    try {
+      const buffer = await fetchRange(url, item.offset, item.offset + item.size - 1, _abortController?.signal);
+      const elapsedSec = Math.max((performance.now() - startedAt) / 1000, 0.001);
+      telemetry.recordDownload(buffer.byteLength, elapsedSec);
+      await respectSpeedCap(buffer.byteLength, startedAt);
+      cachePut(item.key, buffer);
+      telemetry.updateMemoryUsage(cache.totalSize);
+      return true;
+    } catch (e) {
+      if (e?.name !== 'AbortError') warn(`cache fetch ${item.key} failed:`, e.message || e);
+      return false;
+    } finally {
+      unmarkPending(item.key);
+    }
+  }
+
   /** Fetch the init segment plus the first fragments of another track into the cache. */
   async function warmTrackFragments(trackId, count = NEXT_TRACK_FRAGMENTS) {
     if (!trackId || trackId === currentTrackId.value || _isShuttingDown) return;
@@ -651,38 +690,30 @@ export function useMseBuffer() {
     for (let i = 0; i < count; i += 1) wanted.push(`${trackId}-${i}`);
     if (wanted.every((key) => cache.has(key))) return;
 
-    const url = api.getAudioUrl(trackId);
     const trackAtStart = currentTrackId.value;
     _warmInFlight.add(trackId);
     try {
       let meta = _manifests.get(trackId);
       if (!meta) {
-        meta = await fetchManifest(url);
+        meta = await fetchManifest(api.getAudioUrl(trackId));
         _manifests.set(trackId, meta);
       }
 
       const keys = [];
-      if (meta.initEnd && !cache.has(`${trackId}-init`)) keys.push({ key: `${trackId}-init`, offset: 0, size: meta.initEnd });
+      if (meta.initEnd && !cache.has(`${trackId}-init`)) keys.push({ trackId, key: `${trackId}-init`, offset: 0, size: meta.initEnd });
       const total = Math.min(count, (meta.fragments || []).length);
       for (let i = 0; i < total; i += 1) {
         const fragment = meta.fragments[i];
         const key = `${trackId}-${i}`;
-        if (!cache.has(key)) keys.push({ key, offset: fragment.offset, size: fragment.size });
+        if (!cache.has(key)) keys.push({ trackId, key, offset: fragment.offset, size: fragment.size });
       }
 
       let fetched = 0;
       for (const item of keys) {
         // Bail out if playback moved on while we were downloading.
         if (_isShuttingDown || currentTrackId.value !== trackAtStart) break;
-        markPending(item.key);
-        try {
-          cachePut(item.key, await fetchRange(url, item.offset, item.offset + item.size - 1));
-          fetched += 1;
-        } finally {
-          unmarkPending(item.key);
-        }
+        if (await fetchIntoCache(item)) fetched += 1;
       }
-      telemetry.updateMemoryUsage(cache.totalSize);
       if (fetched) log(`warmed next track ${String(trackId).slice(0, 8)}: ${fetched} segments`);
     } catch (e) {
       if (e?.name !== 'AbortError') warn('next-track warm failed:', e.message || e);
@@ -703,6 +734,133 @@ export function useMseBuffer() {
       : PREFETCH_LOOKAHEAD_SEC;
     return bufferedAheadSec(currentTime) >= Math.min(PREFETCH_LOOKAHEAD_SEC, remainingInTrack) - 0.5
       || _lastAppendedIndex + 1 >= fragmentCount.value;
+  }
+
+  // ── Cache aggressiveness (soft window / hard budget fill) ──────
+  //
+  // Playback itself is served by the sequential chain above; everything here is background
+  // top-up. The policy is a pure function (`services/cachePolicy.js`), so these helpers only
+  // answer "which bytes are missing" and then go and get them.
+
+  /** Manifest fragments for a track, preferring the loaded one; [] when its table is unknown. */
+  function manifestFragments(trackId) {
+    if (!trackId) return [];
+    if (trackId === currentTrackId.value) return fragments.value || [];
+    return _manifests.get(trackId)?.fragments || [];
+  }
+
+  function manifestInitEnd(trackId) {
+    if (!trackId) return 0;
+    if (trackId === currentTrackId.value) return _initEnd;
+    return _manifests.get(trackId)?.initEnd || 0;
+  }
+
+  /** What `evictionRank` needs: the playhead, the queue order, and any loop region. */
+  function rankContext() {
+    const loop = loopRegion.value;
+    return {
+      currentTrackId: currentTrackId.value,
+      playheadIndex: fragmentIndexForTime(getCurrentTime()),
+      playlistIds: playlistTrackIds(playlist.value),
+      loopStartIndex: loop ? fragmentIndexForTime(loop.startSec) : null,
+      loopEndIndex: loop ? fragmentIndexForTime(loop.endSec ?? loop.startSec) : null,
+    };
+  }
+
+  /** The queue ahead — or the current track itself, because under repeat-one that is what plays next. */
+  function upcomingAhead() {
+    if (repeatMode.value === 'one') return currentTrackId.value ? [currentTrackId.value] : [];
+    return upcomingTrackIds({
+      playlist: playlist.value,
+      currentTrackId: currentTrackId.value,
+      wrap: repeatMode.value === 'all' || playlistLoop.value,
+    });
+  }
+
+  /**
+   * Bytes a fill pass may spend: free space plus what eviction could legally free — audio already
+   * played and warmed bytes of tracks nobody queued, never the queue ahead. That is what makes
+   * "fill the budget" a sliding window instead of a runaway download: once the cache holds the
+   * current track and the next few, only the playhead moving forward funds anything more.
+   */
+  function fillBudgetBytes() {
+    if (cacheMode.value !== 'hard') return Number.POSITIVE_INFINITY;
+    return Math.max(cache.maxCacheBytes - cache.totalSize, 0) + cache.releasableBelow(RANK_AHEAD);
+  }
+
+  /**
+   * Hard mode cannot plan a track whose manifest it has never seen. Ask for the next few, and only
+   * when there is room to use them, so a thousand-item queue costs a handful of JSON requests.
+   */
+  async function widenManifestHorizon(trackAtStart, roomBytes, ids) {
+    if (roomBytes < 256 * 1024) return false;
+    let fetched = 0;
+    for (const trackId of ids) {
+      if (fetched >= MANIFEST_HORIZON) break;
+      if (_isShuttingDown || currentTrackId.value !== trackAtStart) break;
+      if (_manifests.has(trackId)) continue;
+      try {
+        _manifests.set(trackId, await fetchManifest(api.getAudioUrl(trackId)));
+        fetched += 1;
+      } catch (e) {
+        if (e?.name !== 'AbortError') warn('manifest', String(trackId).slice(0, 8), 'failed:', e.message || e);
+        break;
+      }
+    }
+    return fetched > 0;
+  }
+
+  /**
+   * Walk the policy's plan and pull the missing bytes. Callers gate on `nextTrackBandwidthFree()`,
+   * so a fill never competes with the fragment being heard.
+   */
+  async function fillCache() {
+    if (_fillInFlight || _isShuttingDown || !_initAppended) return;
+    const trackAtStart = currentTrackId.value;
+    if (!trackAtStart) return;
+
+    const hard = cacheMode.value === 'hard';
+    const ids = upcomingAhead();
+    let budget = fillBudgetBytes();
+    const planArgs = () => ({
+      mode: cacheMode.value,
+      currentTrackId: trackAtStart,
+      playheadIndex: fragmentIndexForTime(getCurrentTime()),
+      fragmentsOf: manifestFragments,
+      initEndOf: manifestInitEnd,
+      has: (key) => cache.has(key),
+      budgetBytes: budget,
+      upcomingIds: ids,
+    });
+
+    let plan = planCacheFill(planArgs());
+    // Nothing missing inside the manifests we hold and budget to spare: widen, then try again.
+    if (hard && !plan.length && await widenManifestHorizon(trackAtStart, budget, ids)) {
+      budget = fillBudgetBytes();
+      plan = planCacheFill(planArgs());
+    }
+    if (!plan.length) return;
+
+    const ctx = hard ? rankContext() : null;
+    _fillInFlight = true;
+    let fetched = 0;
+    try {
+      for (const item of plan) {
+        if (_isShuttingDown || currentTrackId.value !== trackAtStart) break;
+        if (cache.has(item.key)) continue;
+        // Checked per item, because the budget is only estimated up front: a fill that paid for
+        // the twentieth track with the bytes of the second is the exact mistake this policy exists
+        // to prevent.
+        if (hard && !cache.fitsAlongside(item.size, evictionRank(item.key, ctx))) {
+          log('cache budget full, fill stops at', item.key);
+          break;
+        }
+        if (await fetchIntoCache(item)) fetched += 1;
+      }
+      if (fetched) log(`cache fill (${cacheMode.value}): ${fetched} segments`);
+    } finally {
+      _fillInFlight = false;
+    }
   }
 
   const nextTrackId = computed(() => nextPlaylistTrackId());
@@ -881,13 +1039,12 @@ export function useMseBuffer() {
         fetchFragmentInSequence(Math.max(_lastAppendedIndex + 1, currentIndex));
       }
 
-      // Nothing useful left to download for *this* track — spend the idle bandwidth on the next
-      // one. Comparing against the raw lookahead alone never fires on short tracks, or near the
-      // end of a long one, because the remaining audio is smaller than the reserve.
-      if (nextTrackBandwidthFree()) {
-        const nextId = nextPlaylistTrackId();
-        if (nextId) warmTrackFragments(nextId);
-      }
+      // Nothing useful left to download for *this* track — spend the idle bandwidth on what the
+      // cache policy wants next: `soft` tops the window up to the next few chunks, `hard` keeps
+      // buying queue until the byte budget is full. Comparing against the raw lookahead alone
+      // never fires on short tracks, or near the end of a long one, because the remaining audio
+      // is smaller than the reserve.
+      if (nextTrackBandwidthFree()) fillCache();
 
       for (const index of wanted) {
         const key = `${currentTrackId.value}-${index}`;
@@ -1056,17 +1213,26 @@ export function useMseBuffer() {
     evictToBudget();
   }
 
-  /** Oldest-first eviction, skipping the protected pool (loop regions). */
+  function setCacheMode(mode) {
+    const next = normalizeCacheMode(mode);
+    if (cacheMode.value === next) return;
+    cacheMode.value = next;
+    // Soft keeps the cache's insertion-order eviction: its window is a few chunks and the order
+    // never matters. Hard fills the budget with the queue, where insertion order would evict the
+    // next song to keep the twentieth, so eviction follows the playhead instead.
+    cache.evictionRank = next === 'hard' ? (key) => evictionRank(key, rankContext()) : null;
+    log('cache mode:', next, 'used:', cache.totalSize);
+    fillCache(); // switching to hard starts filling now rather than waiting for the next tick
+  }
+
+  /** Most disposable first: insertion order in soft mode, playback order in hard mode. */
   function evictToBudget() {
     if (cache.totalSize <= cache.maxCacheBytes) return;
-    const entries = [...cache.cacheMap.entries()]
-      .map(([key, entry]) => ({ key, ...entry }))
-      .sort((a, b) => a.timestamp - b.timestamp);
 
-    for (const entry of entries) {
+    for (const key of cache.evictionOrder()) {
       if (cache.totalSize <= cache.maxCacheBytes) break;
-      if (cache.protectedPool?.has(entry.key)) continue;
-      cacheRemove(entry.key);
+      if (cache.protectedPool?.has(key)) continue;
+      cacheRemove(key);
     }
     telemetry.updateMemoryUsage(cache.totalSize);
   }
@@ -1084,5 +1250,6 @@ export function useMseBuffer() {
     getCurrentTime, bindAudioEvents, updateBufferedRanges, setCacheLimit, setSpeedCap,
     setRepeatMode, setPlaylistLoop, playlistLoop,
     warmTrackFragments, nextPlaylistTrackId, nextTrackId,
+    cacheMode, setCacheMode,
   };
 }

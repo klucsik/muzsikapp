@@ -23,6 +23,27 @@
           </div>
         </div>
 
+        <!-- Cache aggressiveness -->
+        <div class="setting-row">
+          <span class="row-label" id="cache-mode-label">Cache fill</span>
+          <div class="segmented" role="group" aria-labelledby="cache-mode-label">
+            <button
+              type="button"
+              :class="['segment', { active: cacheMode === 'soft' }]"
+              :aria-pressed="String(cacheMode === 'soft')"
+              :title="`Soft: keep the next ${SOFT_CACHE_CHUNKS} chunks warm (~3 min). Small and predictable; the decoder reserve already covers most of it.`"
+              @click="onCacheModeChange('soft')"
+            >Soft</button>
+            <button
+              type="button"
+              :class="['segment', { active: cacheMode === 'hard' }]"
+              :aria-pressed="String(cacheMode === 'hard')"
+              title="Hard: cache the whole current track, then the playlist, until the memory budget is full. Audio ahead of the playhead is never dropped for audio further away."
+              @click="onCacheModeChange('hard')"
+            >Hard</button>
+          </div>
+        </div>
+
         <!-- Speed Cap -->
         <div class="setting-row">
           <label for="speed-cap-select">Download cap</label>
@@ -125,6 +146,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue';
+import { SOFT_CACHE_CHUNKS } from '../services/cachePolicy.js';
 
 // ── Logging ──────────────────────────────────────────────────────
 function log(...args) { console.log('[Settings]', ...args); }
@@ -132,6 +154,7 @@ function log(...args) { console.log('[Settings]', ...args); }
 // ── Props / Emits ────────────────────────────────────────────────
 
 const props = defineProps({
+  cacheMode:       { type: String,  default: 'soft' },
   usedMemory:      { type: Number, default: 0 },
   totalMemory:     { type: Number, default: 50 * 1024 * 1024 },
   speedHistory:    { type: Array,  default: () => [] },
@@ -146,6 +169,7 @@ const props = defineProps({
 
 const emit = defineEmits([
   'update-cache-limit',
+  'update-cache-mode',
   'update-speed-cap',
 ]);
 
@@ -165,6 +189,14 @@ const cacheSizeMb = computed(() => Math.round(props.totalMemory / (1024 * 1024))
 function onCacheSizeChange(e) {
   const mb = parseInt(e.target.value, 10);
   emit('update-cache-limit', mb * 1024 * 1024);
+}
+
+// ── Cache Aggressiveness ───────────────────────────────────────
+
+function onCacheModeChange(mode) {
+  if (mode === props.cacheMode) return;
+  log('cache mode:', mode);
+  emit('update-cache-mode', mode);
 }
 
 // ── Speed Cap Selector ───────────────────────────────────────────
@@ -335,7 +367,8 @@ defineExpose({ isOpen, togglePanel });
   color: #999;
 }
 
-.setting-row > label {
+.setting-row > label,
+.setting-row > .row-label {
   flex: 0 0 74px;
   white-space: nowrap;
 }
@@ -378,6 +411,37 @@ defineExpose({ isOpen, togglePanel });
   flex: 0 0 auto;
   min-width: 40px;
   text-align: right;
+}
+
+/* Cache aggressiveness: two labels, one choice. A `<select>` would hide what the other option
+   means, and the whole point of the setting is the trade-off between the two. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid #444;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.segment {
+  background: #1a1a1a;
+  border: none;
+  color: #999;
+  padding: 2px 10px;
+  font-size: 0.72em;
+  cursor: pointer;
+}
+
+.segment + .segment {
+  border-left: 1px solid #444;
+}
+
+.segment:hover {
+  color: #e0e0e0;
+}
+
+.segment.active {
+  background: #4CAF50;
+  color: #121212;
 }
 
 /* Speed cap */

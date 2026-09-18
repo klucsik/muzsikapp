@@ -1,9 +1,11 @@
 /**
- * chunkCache — Memory-bounded LRU-style cache for audio segments.
- * 
- * Manages an in-memory pool of ArrayBuffers (audio chunks). 
- * Uses timestamp-based eviction to remove oldest non-protected chunks 
- * when the memory budget is exceeded.
+ * chunkCache — Memory-bounded pool of audio segments.
+ *
+ * Manages an in-memory pool of ArrayBuffers (audio chunks). By default the oldest non-protected
+ * chunk goes when the memory budget is exceeded, which is all a small lookahead window needs.
+ * `evictionRank` replaces that order with a caller-supplied disposability score — the hard
+ * cache-aggressiveness mode packs the budget with the queue, where insertion order would throw
+ * away the next song to keep the twentieth (see services/cachePolicy.js).
  */
 
 export class ChunkCache {
@@ -19,6 +21,12 @@ export class ChunkCache {
     this.protectedPool = new Set();
     /** @type {Set<number>} Indices currently being fetched via network */
     this.pendingIndices = new Set();
+    /**
+     * Optional `(key) => number` disposability score: eviction takes the lowest rank first and
+     * falls back to insertion order on ties. Null keeps the timestamp behaviour.
+     * @type {((key: any) => number)|null}
+     */
+    this.evictionRank = null;
   }
 
   /**
@@ -127,22 +135,56 @@ export class ChunkCache {
     this.protectedPool.clear();
   }
 
+  /** Every key, ordered most disposable first — the order eviction would take them. */
+  evictionOrder() {
+    return [...this.cacheMap.entries()]
+      .map(([key, entry]) => ({
+        key,
+        rank: this.evictionRank ? this.evictionRank(key) : entry.timestamp,
+        timestamp: entry.timestamp,
+      }))
+      .sort((a, b) => (a.rank - b.rank) || (a.timestamp - b.timestamp))
+      .map((item) => item.key);
+  }
+
   /**
-   * Internal method to evict oldest unprotected chunks if budget is exceeded.
+   * Bytes that could be freed without touching anything as valuable as `rank` — i.e. what is
+   * strictly more disposable. Protected entries never count.
+   */
+  releasableBelow(rank) {
+    if (!this.evictionRank) return this.totalSize; // timestamp order: everything is older than the future
+    let bytes = 0;
+    for (const [key, entry] of this.cacheMap) {
+      if (this.protectedPool.has(key)) continue;
+      if (this.evictionRank(key) >= rank) continue;
+      bytes += entry.buffer.byteLength;
+    }
+    return bytes;
+  }
+
+  /**
+   * Can `bytes` be afforded without evicting audio that is nearer the playhead than a chunk whose
+   * rank is `rank`? Callers use this to stop a background fill before it buys a track forty places
+   * down the queue with the bytes of the next one.
+   */
+  fitsAlongside(bytes, rank = null) {
+    const room = this.maxCacheBytes - this.totalSize;
+    if (room >= bytes || rank === null) return true; // no policy installed: `put` falls back to oldest-first
+    return this.releasableBelow(rank) >= bytes - room;
+  }
+
+  /**
+   * Internal method to evict the most disposable unprotected chunks if budget is exceeded.
    * @private
    * @param {number} incomingSize - Size of the new chunk being added
    */
   _evictIfNeeded(incomingSize) {
     if (this.totalSize + incomingSize <= this.maxCacheBytes) return;
 
-    const sortedEntries = [...this.cacheMap.entries()]
-      .map(([index, entry]) => ({ index, ...entry }))
-      .sort((a, b) => a.timestamp - b.timestamp);
-
-    for (const entry of sortedEntries) {
+    for (const key of this.evictionOrder()) {
       if (this.totalSize + incomingSize <= this.maxCacheBytes) break;
-      if (this.protectedPool.has(entry.index)) continue;
-      this.remove(entry.index);
+      if (this.protectedPool.has(key)) continue;
+      this.remove(key);
     }
   }
 }

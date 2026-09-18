@@ -89,7 +89,9 @@ vi.mock('../src/composables/useMseBuffer.js', async (importOriginal) => {
     loadTrack: vi.fn(async () => { mse.currentTrackId.value = 't1'; }),
     bindAudioEvents: vi.fn(),
     updateBufferedRanges: vi.fn(),
+    cacheMode: ref('soft'),
     setCacheLimit: vi.fn(),
+    setCacheMode: vi.fn(),
     setSpeedCap: vi.fn(),
     setRepeatMode: vi.fn(),
     playlistLoop: ref(false),
@@ -377,5 +379,32 @@ describe('AudioPlayerV2 controls', () => {
     expect(wrapper.find('.audio-unlock-overlay').exists()).toBe(false);
     expect(h.websocket.requestState).toHaveBeenCalled();
     wrapper.unmount();
+  });
+});
+
+describe('AudioPlayerV2 cache aggressiveness', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('applies the saved cache mode when the player mounts', async () => {
+    localStorage.setItem('muzsikapp-player-settings-v2', JSON.stringify({ cacheMode: 'hard' }));
+
+    await mountPlayer();
+
+    // A hard-mode listener must not get soft behaviour just because they have not opened the
+    // settings panel yet — the first track is already downloading by then.
+    expect(mse.setCacheMode).toHaveBeenCalledWith('hard');
+  });
+
+  it('defaults to soft with nothing saved', async () => {
+    await mountPlayer();
+
+    expect(mse.setCacheMode).toHaveBeenCalledWith('soft');
   });
 });
