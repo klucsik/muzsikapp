@@ -58,8 +58,14 @@
         <!-- Grey blocks for cached/buffered regions ahead of playhead -->
         <template v-if="cachedBlocks.length > 0">
           <div
+            v-for="(block, i) in heldBlocks"
+            :key="'h' + i"
+            class="cached-block held"
+            :style="{ left: block.start + '%', width: block.width + '%' }"
+          ></div>
+          <div
             v-for="(block, i) in cachedBlocks"
-            :key="i"
+            :key="'b' + i"
             class="cached-block"
             :style="{ left: block.start + '%', width: block.width + '%' }"
           ></div>
@@ -170,7 +176,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { useMseBuffer, isMseAacSupported } from '../composables/useMseBuffer.js';
+import { planCacheBlocks, useMseBuffer, isMseAacSupported } from '../composables/useMseBuffer.js';
 import SettingsPanel from './SettingsPanel.vue';
 import api from '../services/api';
 import websocket from '../services/websocket';
@@ -251,22 +257,19 @@ const cachedChunkCount = computed(() => mse.cachedChunkCount.value || 0);
  * Convert MSE buffered TimeRanges into an array of { start, width } percent blocks.
  * Only includes regions ahead of the current playhead (grey cached indicators).
  */
-const cachedBlocks = computed(() => {
-  const spans = mse.bufferedRanges.value;
-  if (!spans?.length || !duration.value) return [];
-
-  const blocks = [];
-  for (const span of spans) {
-    // Show only what is still ahead of the playhead; the played part is the green fill.
-    const start = Math.max(span.start, currentTime.value);
-    if (span.end <= start) continue;
-    blocks.push({
-      start: (start / duration.value) * 100,
-      width: ((span.end - start) / duration.value) * 100,
-    });
-  }
-  return blocks;
-});
+/**
+ * Loaded audio ahead of the playhead, in two layers: `loaded` sits in the decoder already,
+ * `held` is in the fragment cache and only needs an append. Without the second layer a fully
+ * cached track looked like its last chunk was missing while the playlist row said otherwise.
+ */
+const cacheLayers = computed(() => planCacheBlocks({
+  buffered: mse.bufferedRanges.value,
+  cached: mse.cachedSpans.value,
+  currentTime: currentTime.value,
+  duration: duration.value,
+}));
+const cachedBlocks = computed(() => cacheLayers.value.loaded);
+const heldBlocks = computed(() => cacheLayers.value.held);
 
 // ── Time Formatting ──────────────────────────────────────────────
 
@@ -1173,6 +1176,13 @@ audio {
   border-radius: 0 2px 2px 0;
   z-index: 1;
   pointer-events: none;
+}
+
+/* Held in the fragment cache, not in the decoder yet: same grey, quieter, and squared off so the
+   boundary with the appended audio stays legible. */
+.cached-block.held {
+  background: rgba(158, 158, 158, 0.16);
+  border-radius: 0;
 }
 
 .progress-handle {

@@ -53,14 +53,18 @@ vi.mock('../src/composables/useTelemetry.js', () => ({
 // The fake composable has to hand out real refs — the component derives computed state
 // (`repeatOn`, `showLoopMarkers`) from them.
 let mse: any;
-vi.mock('../src/composables/useMseBuffer.js', async () => {
+vi.mock('../src/composables/useMseBuffer.js', async (importOriginal) => {
   const { ref } = await import('vue');
+  // The composable is a scripted fake, but `planCacheBlocks` is pure maths the bar depends on,
+  // so keep the real one and stub only the stateful half.
+  const actual = await importOriginal<any>();
   mse = {
     playing: ref(false),
     error: ref(null),
     repeatMode: ref('none'),
     loopRegion: ref(null),
     bufferedRanges: ref([]),
+    cachedSpans: ref([]),
     chunkRows: ref([]),
     cachedChunkCount: ref(0),
     pendingCount: ref(0),
@@ -93,7 +97,7 @@ vi.mock('../src/composables/useMseBuffer.js', async () => {
     warmTrackFragments: vi.fn(),
     nextPlaylistTrackId: vi.fn(() => null),
   };
-  return { useMseBuffer: () => mse, isMseAacSupported: () => true };
+  return { ...actual, useMseBuffer: () => mse, isMseAacSupported: () => true };
 });
 
 const DURATION = 100;

@@ -7,9 +7,9 @@ const MANIFEST = {
   durationSec: 90,
   initEnd: 3209,
   fragments: [
-    { offset: 3209, size: 1000, startSec: 0 },
-    { offset: 4209, size: 1000, startSec: 30 },
-    { offset: 5209, size: 1000, startSec: 60 },
+    { index: 0, offset: 3209, size: 1000, start: 0, end: 30, startSec: 0 },
+    { index: 1, offset: 4209, size: 1000, start: 30, end: 60, startSec: 30 },
+    { index: 2, offset: 5209, size: 1000, start: 60, end: 90, startSec: 60 },
   ],
 };
 
@@ -196,6 +196,20 @@ describe('next-track warming', () => {
     mse.setCacheLimit(1);
     expect(mse.cacheCoverage.value[uuid]).toBeUndefined();
     expect(mse.cachedChunkCount.value).toBe(0);
+  });
+
+  it('reports cached time ranges for the track the seek bar is showing', async () => {
+    installFetch();
+    const uuid = '7fd106c7-bdd0-4486-bb70-af763ec87254';
+
+    // Warmed as the next track, then played: every byte is in hand, none of it appended yet.
+    await mse.warmTrackFragments(uuid, 2);
+    await mse.loadTrack(uuid, '/audio/b', fakeAudioElement(), 90);
+    expect(mse.cachedSpans.value).toEqual([{ start: 0, end: 60 }]);
+
+    // Oldest-first eviction leaves a detached range behind: the bar has to show the hole.
+    mse.setCacheLimit(64);
+    expect(mse.cachedSpans.value).toEqual([{ start: 30, end: 60 }]);
   });
 
   it('drops coverage of an older track when a newer one evicts it', async () => {

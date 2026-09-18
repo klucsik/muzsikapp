@@ -31,6 +31,53 @@ const MAX_APPEND_RETRIES = 2;
 // so the suffix has to be anchored: the id is everything before the *last* dash.
 const CACHE_KEY_RE = /^(.+)-(init|\d+)$/;
 
+/** Spans of `spans` not covered by `holes`; both are {start,end} lists in seconds. */
+function subtractSpans(spans, holes) {
+  const out = [];
+  for (const span of spans) {
+    let parts = [{ start: span.start, end: span.end }];
+    for (const hole of holes) {
+      const next = [];
+      for (const part of parts) {
+        if (hole.end <= part.start || hole.start >= part.end) {
+          next.push(part);
+          continue;
+        }
+        if (hole.start > part.start) next.push({ start: part.start, end: hole.start });
+        if (hole.end < part.end) next.push({ start: hole.end, end: part.end });
+      }
+      parts = next;
+    }
+    out.push(...parts);
+  }
+  return out.filter((span) => span.end - span.start > 0.05);
+}
+
+/**
+ * What the seek bar should draw as "loaded", in percentages of `duration`.
+ *
+ * Two different things get called loaded: audio the decoder already holds (`buffered`) and audio
+ * the fragment cache still holds (`cached`). They part company whenever bytes are in hand but not
+ * yet appended — right after loading a warmed or replayed track, where the row strip correctly
+ * reads 100% while the bar crept up behind it. Returned as two layers so the bar can show the
+ * difference instead of pretending the tail is missing.
+ */
+export function planCacheBlocks({ buffered = [], cached = [], currentTime = 0, duration = 0 } = {}) {
+  if (!duration) return { loaded: [], held: [] };
+  const from = Math.max(0, currentTime);
+  const clip = (spans) => spans
+    .map((span) => ({ start: Math.min(Math.max(span.start, from), duration), end: Math.min(span.end, duration) }))
+    .filter((span) => span.end - span.start > 0.05);
+  const toBlocks = (spans) => spans.map((span) => {
+    const start = (span.start / duration) * 100;
+    return { start, width: Math.min(100 - start, ((span.end - span.start) / duration) * 100) };
+  });
+
+  const loaded = clip(buffered);
+  const held = subtractSpans(clip(cached), loaded);
+  return { loaded: toBlocks(loaded), held: toBlocks(held) };
+}
+
 export function isMseSupported(mimeType = DEFAULT_MIME) {
   return typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(mimeType);
 }
@@ -177,6 +224,22 @@ export function useMseBuffer() {
    * overhead, not audio) and `total` comes from the manifest. A track whose manifest was never
    * fetched gets `total: 0` so the caller can leave it blank instead of drawing a misleading 0%.
    */
+  /**
+   * Time ranges of the *current* track whose fragments are still in the cache. `bufferedRanges`
+   * only reports what reached the SourceBuffer, and a warmed or replayed track sits fully in
+   * memory seconds before the appends catch up — the seek bar needs both to say "loaded".
+   */
+  const cachedSpans = computed(() => {
+    const spans = [];
+    for (const row of chunkRows.value) {
+      if (!row.downloaded || row.end <= row.start) continue;
+      const last = spans[spans.length - 1];
+      if (last && row.start - last.end < 0.01) last.end = Math.max(last.end, row.end);
+      else spans.push({ start: row.start, end: row.end });
+    }
+    return spans;
+  });
+
   const cacheCoverage = computed(() => {
     void cacheVersion.value;
     const byTrack = {};
@@ -1015,7 +1078,7 @@ export function useMseBuffer() {
   return {
     playing, bufferedRanges, error, mseSupported, loadProgress, currentTrackId,
     trackDuration, playlist, loopRegion, repeatMode, cacheSize, pendingCount,
-    cachedChunkCount, cachedKeys, pendingKeys, chunkRows, warmedTracks, cacheCoverage,
+    cachedChunkCount, cachedKeys, pendingKeys, chunkRows, warmedTracks, cacheCoverage, cachedSpans,
     fragments, fragmentCount, needsFallback,
     initMediaSource, shutdown, loadTrack, play, pause, togglePlayPause, seek, setVolume,
     getCurrentTime, bindAudioEvents, updateBufferedRanges, setCacheLimit, setSpeedCap,
