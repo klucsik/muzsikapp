@@ -52,7 +52,7 @@
         <h4>Telemetry</h4>
 
         <!-- Memory Usage Bar -->
-        <div class="metric-row memory-bar-wrapper">
+        <div class="metric-row">
           <label>Memory</label>
           <div class="memory-bar" :class="memoryBarClass">
             <div class="memory-fill" :style="{ width: memoryPercent + '%' }"></div>
@@ -60,13 +60,11 @@
           </div>
         </div>
 
-        <!-- Sparkline Chart -->
-        <div class="metric-row sparkline-wrapper">
-          <label>Speed (60s)</label>
-          <svg class="sparkline" viewBox="0 0 280 50" preserveAspectRatio="none">
-            <!-- Tick marks at ~20s and ~40s -->
-            <text x="93" y="48" fill="#666" font-size="8" text-anchor="middle">-20s</text>
-            <text x="187" y="48" fill="#666" font-size="8" text-anchor="middle">-40s</text>
+        <!-- Sparkline Chart: 60 s window, peak in the tooltip -->
+        <div class="metric-row">
+          <label>Speed</label>
+          <svg class="sparkline" viewBox="0 0 280 50" preserveAspectRatio="none"
+               :title="sparkMax > 0 ? `peak ${formatBytes(sparkMax)}/s in the last 60 s` : 'no samples in the last 60 s'">
             <!-- Y-axis grid lines -->
             <line v-if="sparkMax > 0" x1="0" y1="10" x2="280" y2="10" stroke="#333" stroke-width="0.5" />
             <line v-if="sparkMax > 0" x1="0" y1="25" x2="280" y2="25" stroke="#333" stroke-width="0.5" />
@@ -92,24 +90,18 @@
           </svg>
         </div>
 
-        <!-- Stall Counter -->
+        <!-- Stall counter + buffer health, one line -->
         <div class="metric-row stat-row">
-          <span class="stat-label">Stalls:</span>
-          <span class="stat-value">{{ stallCount }} (total {{ totalStallDuration.toFixed(1) }}s)</span>
-        </div>
-
-        <!-- Buffer Health -->
-        <div class="metric-row health-row">
           <span :class="['health-dot', healthDotClass]"></span>
-          <span class="stat-label">Cache:</span>
+          <span class="stat-value" :title="'Stalled for ' + totalStallDuration.toFixed(1) + 's total'">{{ stallCount }} stalls ({{ totalStallDuration.toFixed(1) }}s)</span>
+          <span class="stat-sep">|</span>
           <span class="stat-value">{{ cachedChunks }} chunks</span>
           <span class="stat-sep">|</span>
-          <span class="stat-label">Downloading:</span>
-          <span class="stat-value">{{ downloadingCount }}</span>
+          <span class="stat-value" title="In flight">{{ downloadingCount }} ↓</span>
         </div>
 
         <!-- Track Progress Bar -->
-        <div v-if="trackTotalSize > 0" class="metric-row track-progress-wrapper">
+        <div v-if="trackTotalSize > 0" class="metric-row">
           <label>Track</label>
           <div class="track-progress-bar">
             <div v-if="isFullyCached" class="fully-cached">
@@ -300,9 +292,8 @@ defineExpose({ isOpen, togglePanel });
 
 .panel-content {
   display: flex;
-  gap: 16px;
-  padding: 12px;
-  min-height: 140px;
+  gap: 14px;
+  padding: 8px 10px 9px;
 }
 
 /* ── Settings Section (Left) ─────────────────────────────────── */
@@ -311,36 +302,47 @@ defineExpose({ isOpen, togglePanel });
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
 }
 
 .settings-section h4,
 .telemetry-section h4 {
   margin: 0;
-  font-size: 0.85em;
+  font-size: 0.78em;
   color: #999;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   border-bottom: 1px solid #333;
-  padding-bottom: 4px;
+  padding-bottom: 2px;
+  margin-bottom: 2px;
 }
 
+/* One line per setting: the label is a fixed gutter so the controls line up across rows. */
 .setting-row {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
 }
 
 .setting-row label,
 .metric-row label {
-  font-size: 0.8em;
+  font-size: 0.72em;
   color: #999;
+}
+
+.setting-row > label {
+  flex: 0 0 84px;
+}
+
+.metric-row > label {
+  flex: 0 0 46px;
 }
 
 .slider-group {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
 }
 
 .setting-slider {
@@ -363,9 +365,9 @@ defineExpose({ isOpen, togglePanel });
 }
 
 .slider-value {
-  font-size: 0.8em;
+  font-size: 0.72em;
   color: #e0e0e0;
-  min-width: 50px;
+  min-width: 44px;
   text-align: right;
 }
 
@@ -375,8 +377,8 @@ defineExpose({ isOpen, togglePanel });
   border: 1px solid #444;
   border-radius: 4px;
   color: #e0e0e0;
-  padding: 4px 6px;
-  font-size: 0.8em;
+  padding: 2px 4px;
+  font-size: 0.72em;
 }
 
 .custom-speed-input {
@@ -407,20 +409,18 @@ defineExpose({ isOpen, togglePanel });
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .metric-row {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
 }
 
-.stat-row, .health-row {
-  flex-direction: row;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.8em;
+.stat-row {
+  gap: 5px;
+  font-size: 0.72em;
 }
 
 .stat-label {
@@ -436,12 +436,9 @@ defineExpose({ isOpen, togglePanel });
 }
 
 /* Memory bar */
-.memory-bar-wrapper {
-  flex-direction: column !important;
-}
-
 .memory-bar {
-  height: 24px;
+  flex: 1;
+  height: 16px;
   background: #1a1a1a;
   border-radius: 4px;
   overflow: hidden;
@@ -463,20 +460,16 @@ defineExpose({ isOpen, togglePanel });
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  font-size: 0.7em;
+  font-size: 0.62em;
   color: #fff;
   text-shadow: 0 1px 2px rgba(0,0,0,0.8);
   white-space: nowrap;
 }
 
 /* Sparkline */
-.sparkline-wrapper {
-  flex-direction: column !important;
-}
-
 .sparkline {
-  width: 100%;
-  height: 50px;
+  flex: 1;
+  height: 30px;
 }
 
 /* Health dot */
@@ -493,12 +486,9 @@ defineExpose({ isOpen, togglePanel });
 .health-dot.red    { background: #F44336; }
 
 /* Track progress */
-.track-progress-wrapper {
-  flex-direction: column !important;
-}
-
 .track-progress-bar {
-  height: 12px;
+  flex: 1;
+  height: 10px;
   background: #1a1a1a;
   border-radius: 3px;
   overflow: hidden;
@@ -518,7 +508,7 @@ defineExpose({ isOpen, togglePanel });
   justify-content: center;
   height: 100%;
   color: #4CAF50;
-  font-size: 0.7em;
+  font-size: 0.6em;
 }
 
 .track-text {
@@ -526,7 +516,7 @@ defineExpose({ isOpen, togglePanel });
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  font-size: 0.65em;
+  font-size: 0.6em;
   color: #fff;
   text-shadow: 0 1px 2px rgba(0,0,0,0.8);
   white-space: nowrap;
@@ -536,12 +526,12 @@ defineExpose({ isOpen, togglePanel });
 
 .chevron-toggle {
   width: 100%;
-  padding: 4px;
+  padding: 2px;
   background: #222;
   border: none;
   border-top: 1px solid #333;
   color: #666;
-  font-size: 0.75em;
+  font-size: 0.7em;
   cursor: pointer;
   transition: all 0.2s;
 }
@@ -562,7 +552,7 @@ defineExpose({ isOpen, togglePanel });
 @media (max-width: 768px) {
   .panel-content {
     flex-direction: column;
-    gap: 12px;
+    gap: 8px;
   }
 }
 </style>
