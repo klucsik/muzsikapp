@@ -137,11 +137,6 @@
         </button>
       </div>
 
-      <!-- Load Progress (during initial buffer fill) -->
-      <div v-if="loadProgressPct > 0 && loadProgressPct < 100 && !isPlaying" class="load-progress">
-        <div class="load-bar" :style="{ width: loadProgressPct + '%' }"></div>
-        <span class="load-text">{{ Math.round(loadProgressPct) }}% buffered</span>
-      </div>
     </div>
 
     <!-- Volume Control -->
@@ -247,8 +242,6 @@ const progressPercent = computed(() => {
   if (duration.value === 0) return 0;
   return (currentTime.value / duration.value) * 100;
 });
-
-const loadProgressPct = computed(() => mse.loadProgress.value * 100);
 
 // ── Chunk inventory ────────────────────────────────────────────
 
@@ -1360,31 +1353,6 @@ audio {
 .control-btn.play-pause:hover:not(:disabled) {
   background: #45a049;
   border-color: #45a049;
-}
-
-/* Load progress bar (during initial buffer fill) */
-.load-progress {
-  position: relative;
-  height: 4px;
-  background: #1a1a1a;
-  border-radius: 2px;
-  margin-top: 6px;
-  overflow: hidden;
-}
-
-.load-bar {
-  height: 100%;
-  background: #2196F3;
-  border-radius: 2px;
-  transition: width 0.3s ease;
-}
-
-.load-text {
-  position: absolute;
-  top: -18px;
-  right: 0;
-  color: #2196F3;
-  font-size: 0.75em;
 }
 
 /* ── Volume Control ───────────────────────────────────────────── */
