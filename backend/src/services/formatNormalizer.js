@@ -335,7 +335,11 @@ export function buildManifest(track, meta) {
 export async function normalizeLibrary({ apply = true, limit = 100_000, concurrency = 2 } = {}) {
   const { trackQueries } = await import('../db/database.js');
   const tracks = trackQueries.getAll(limit, 0, 'created_at', 'asc').filter(Boolean);
-  const summary = { checked: 0, normalized: 0, fragmented: 0, wouldNormalize: 0, skipped: 0, failed: 0 };
+  const summary = { checked: 0, normalized: 0, fragmented: 0, wouldNormalize: 0, skipped: 0, failed: 0, reasons: {} };
+  const blame = (reason) => {
+    const key = String(reason || 'unknown reason').slice(0, 160);
+    summary.reasons[key] = (summary.reasons[key] || 0) + 1;
+  };
   const queue = [...tracks];
 
   async function worker() {
@@ -348,13 +352,18 @@ export async function normalizeLibrary({ apply = true, limit = 100_000, concurre
         if (result.status === 'normalized') summary.normalized += 1;
         else if (result.status === 'fragmented') summary.fragmented += 1;
         else if (result.status === 'would-normalize') summary.wouldNormalize += 1;
-        else if (result.status === 'skipped' || result.status === 'missing') summary.skipped += 1;
-        else {
+        else if (result.status === 'skipped' || result.status === 'missing') {
+          summary.skipped += 1;
+          blame(result.reason || 'file missing');
+        } else {
           summary.failed += 1;
+          blame(result.reason);
           logger.warn({ trackId: track.id, reason: result.reason }, 'Normalisation skipped/failed');
         }
       } catch (error) {
         summary.failed += 1;
+        blame(error.message);
+        logger.error({ trackId: track.id, error: error.message }, 'Normalisation threw');
         logger.error({ trackId: track.id, error: error.message }, 'Normalisation threw');
       }
     }
