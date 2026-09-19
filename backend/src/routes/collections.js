@@ -267,6 +267,52 @@ export default () => {
   });
 
   /**
+   * POST /api/collections/:id/tracks/bulk
+   * Append many tracks, or copy another collection, in one transaction and one broadcast.
+   * Body: { track_ids: string[] } | { from: sourceCollectionId }, plus optional
+   *       { mode: 'append' | 'replace' } (default append).
+   * Auth: Required for folders, optional for playlists (including room playlists)
+   */
+  router.post('/:id/tracks/bulk', (req, res) => {
+    try {
+      const db = getDb();
+      const collectionId = req.params.id;
+      const isPlaylist = collectionId === 'current-playlist' || collectionId.startsWith('current-playlist-room-');
+
+      if (!isPlaylist && !req.user) {
+        return res.status(401).json({ error: 'Authentication required for folder operations' });
+      }
+
+      const { track_ids: trackIds, from, mode = 'append' } = req.body || {};
+
+      if (!Array.isArray(trackIds) && !from) {
+        return res.status(400).json({ error: 'track_ids array or from collection is required' });
+      }
+      if (Array.isArray(trackIds) && trackIds.length > 5000) {
+        return res.status(400).json({ error: 'too many tracks in one request (max 5000)' });
+      }
+      if (mode !== 'append' && mode !== 'replace') {
+        return res.status(400).json({ error: "mode must be 'append' or 'replace'" });
+      }
+      if (from && !collectionQueries.getCollection(db, from)) {
+        return res.status(404).json({ error: 'Source collection not found' });
+      }
+
+      const collection = collectionQueries.addTracks(db, collectionId, trackIds || [], {
+        mode,
+        sourceCollectionId: from || null,
+      });
+
+      emitPlaylistUpdate(collectionId);
+
+      res.json(collection);
+    } catch (error) {
+      logger.error({ error, collectionId: req.params.id }, 'Error bulk adding tracks to collection');
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  /**
    * DELETE /api/collections/:id/tracks/:trackId
    * Remove a track from a collection
    * Optional query param: position (to remove specific instance when duplicates exist)

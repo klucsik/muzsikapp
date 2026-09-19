@@ -263,6 +263,73 @@ function deleteCollection(db, collectionId) {
 }
 
 /**
+ * Add many tracks to a collection in a single transaction.
+ *
+ * The per-track endpoint made "play folder" one HTTP request and one broadcast per track, each
+ * returning the whole collection; this is the path that collapses that burst into one round trip.
+ *
+ * @param {Object} db - Database instance
+ * @param {string} collectionId - Target collection ID
+ * @param {Array<string>} trackIds - Track IDs to append, in order (ignored when sourceCollectionId is set)
+ * @param {Object} options - { mode: 'append'|'replace', sourceCollectionId: string|null }
+ * @returns {Object} Updated collection plus how many rows were added and which ids were skipped
+ */
+function addTracks(db, collectionId, trackIds = [], { mode = 'append', sourceCollectionId = null } = {}) {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const result = { added: 0, skipped: [] };
+
+    const bulkTransaction = db.transaction(() => {
+      if (mode === 'replace') {
+        db.prepare('DELETE FROM collection_tracks WHERE collection_id = ?').run(collectionId);
+      }
+
+      const startRow = db.prepare(`
+        SELECT COALESCE(MAX(position), -1) as max_pos FROM collection_tracks WHERE collection_id = ?
+      `).get(collectionId).max_pos;
+
+      // Copying another collection keeps its ordering without shipping its track list to the
+      // client first, so a folder load costs no payload at all until the response.
+      if (sourceCollectionId) {
+        const copied = db.prepare(`
+          INSERT INTO collection_tracks (collection_id, track_id, position, added_at)
+          SELECT ?, ct.track_id, ? + ct.position + 1, ?
+          FROM collection_tracks ct
+          WHERE ct.collection_id = ?
+            AND EXISTS (SELECT 1 FROM tracks t WHERE t.id = ct.track_id)
+          ORDER BY ct.position ASC
+        `).run(collectionId, startRow, now, sourceCollectionId);
+        result.added = copied.changes;
+        return;
+      }
+
+      const exists = db.prepare('SELECT 1 FROM tracks WHERE id = ?');
+      const insert = db.prepare(`
+        INSERT INTO collection_tracks (collection_id, track_id, position, added_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      trackIds.forEach((trackId, index) => {
+        if (!trackId || !exists.get(trackId)) {
+          result.skipped.push(trackId);
+          return;
+        }
+        insert.run(collectionId, trackId, startRow + index + 1, now);
+        result.added += 1;
+      });
+    });
+
+    bulkTransaction();
+
+    db.prepare('UPDATE track_collections SET updated_at = ? WHERE id = ?').run(now, collectionId);
+
+    return { ...getCollection(db, collectionId), ...result };
+  } catch (error) {
+    logger.error('Error adding tracks to collection:', error);
+    throw error;
+  }
+}
+
+/**
  * Add a track to a collection at a specific position
  * @param {Object} db - Database instance
  * @param {string} collectionId - Collection ID
@@ -615,6 +682,7 @@ export {
   updateCollection,
   deleteCollection,
   addTrack,
+  addTracks,
   removeTrack,
   reorderTrack,
   clearTracks,

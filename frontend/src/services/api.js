@@ -146,6 +146,19 @@ class ApiClient {
     });
   }
 
+  /**
+   * Append many tracks, or copy a whole collection, in one request.
+   * @param {string} collectionId target collection
+   * @param {Object} payload { trackIds } or { from }, plus optional { mode: 'append'|'replace' }
+   */
+  async loadTracksIntoCollection(collectionId, { trackIds = null, from = null, mode = 'append' } = {}) {
+    const body = from ? { from, mode } : { track_ids: trackIds, mode };
+    return this.request(`/api/collections/${collectionId}/tracks/bulk`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
   async removeTrackFromCollection(collectionId, trackId, position = null) {
     const url = position !== null 
       ? `/api/collections/${collectionId}/tracks/${trackId}?position=${position}`
