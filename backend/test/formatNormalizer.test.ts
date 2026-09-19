@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { execFileSync } from 'child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -16,6 +16,7 @@ const { initDatabase, closeDatabase, trackQueries } = await import('../src/db/da
 const { normalizeTrack, getPlayMeta, buildManifest, planNormalization, probeCodec } =
   await import('../src/services/formatNormalizer.js');
 const { scanMp4 } = await import('../src/utils/mp4Boxes.js');
+const { canonicalFormat, getMimeType } = await import('../src/utils/audioFormat.js');
 
 let dir;
 let musicDir;
@@ -86,6 +87,23 @@ function freshTrack(name = 'prog.m4a', source = sourcePath) {
   return trackFor(name);
 }
 
+/** A real mp3 in the library, with the row a scan would have written for it. */
+function freshMp3Track(name = 'song.mp3', durationSec = 3) {
+  const existing = trackQueries.getByFilepath(name);
+  if (existing) {
+    trackQueries.delete(existing.id);
+    rmSync(join(musicDir, name), { force: true });
+  }
+
+  ffmpeg([
+    '-f', 'lavfi',
+    '-i', `sine=frequency=440:sample_rate=44100:duration=${durationSec}`,
+    '-ac', '2', '-c:a', 'mp3', '-b:a', '128k',
+    join(musicDir, name),
+  ]);
+  return trackFor(name, { format: 'MP3 (MPEG audio layer 3)' });
+}
+
 describe('planNormalization', () => {
   it('only fragments m4a containers', () => {
     expect(planNormalization({ format: 'M4A/isom/iso2' }).supported).toBe(true);
@@ -96,6 +114,14 @@ describe('planNormalization', () => {
   it('tells the client to use the V1 player for unsupported formats', () => {
     const plan = planNormalization({ format: 'MP3 (MPEG audio layer 3)' });
     expect(plan.reason).toMatch(/V1/);
+  });
+
+  it('re-encodes an mp3 only when someone asked for it', () => {
+    expect(planNormalization({ format: 'MP3 (MPEG audio layer 3)' }, { transcode: true }))
+      .toMatchObject({ supported: true, transcode: true });
+    // The list is a decision, not a capability: ffmpeg decodes flac happily, but re-encoding a
+    // lossless source is a bigger call than re-encoding an mp3, so it is not on by default.
+    expect(planNormalization({ format: 'FLAC' }, { transcode: true }).supported).toBe(false);
   });
 });
 
@@ -222,6 +248,76 @@ describe('normalizeTrack', () => {
   });
 });
 
+describe('transcode — mp3 replaced by fragmented AAC', () => {
+  it('is skipped, then only reported, until it is actually asked for', async () => {
+    const track = freshMp3Track('asked.mp3');
+    const row = trackQueries.getById(track.id);
+
+    expect((await normalizeTrack(row)).status).toBe('skipped');
+    expect((await normalizeTrack(row, { apply: false, transcode: true })).status).toBe('would-transcode');
+
+    // Neither call touched the library.
+    expect(existsSync(join(musicDir, 'asked.mp3'))).toBe(true);
+    expect(trackQueries.getById(track.id).filepath).toBe('asked.mp3');
+  });
+
+  it('replaces the source, moves the row, and indexes the result', async () => {
+    const track = freshMp3Track('replace-me.mp3');
+
+    const result = await normalizeTrack(trackQueries.getById(track.id), { transcode: true });
+
+    expect(result.status).toBe('transcoded');
+    expect(result.to).toBe('replace-me.m4a');
+    expect(result.bytesBefore).toBeGreaterThan(result.bytesAfter * 0);
+    expect(existsSync(join(musicDir, 'replace-me.mp3'))).toBe(false);
+
+    const row = trackQueries.getById(track.id);
+    expect(row.filepath).toBe('replace-me.m4a');
+    expect(row.filename).toBe('replace-me.m4a');
+    // The audio route names the content type off the row, so a moved row has to say m4a.
+    expect(canonicalFormat(row)).toBe('m4a');
+    expect(getMimeType(row)).toBe('audio/mp4');
+    expect(Number(row.file_size)).toBe(result.meta.fileSize);
+
+    const filePath = join(musicDir, row.filepath);
+    expect((await scanMp4(filePath)).fragmented).toBe(true);
+    expect((await probeCodec(filePath)).mime).toMatch(/mp4a/);
+    expect(JSON.parse(row.mse_meta).fragmentCount).toBeGreaterThan(0);
+    expect(readdirSync(musicDir).filter((name) => name.includes('.frag-'))).toEqual([]);
+  });
+
+  it('keeps a second of audio it would have overwritten', async () => {
+    // A library holding both song.mp3 and song.m4a: the m4a is somebody else's file.
+    const track = freshMp3Track('both.mp3');
+    copyFileSync(join(musicDir, 'both.mp3'), join(musicDir, 'both.m4a'));
+
+    const result = await normalizeTrack(trackQueries.getById(track.id), { transcode: true });
+
+    expect(result.to).toBe('both.v2.m4a');
+    expect(existsSync(join(musicDir, 'both.m4a'))).toBe(true);
+    expect(trackQueries.getById(track.id).filepath).toBe('both.v2.m4a');
+  });
+
+  it('leaves the mp3 alone when the encoder fails', async () => {
+    const track = freshMp3Track('doomed.mp3');
+    const before = statSync(join(musicDir, 'doomed.mp3'));
+    config.transcodeTimeoutMs = 1; // guaranteed to kill the encode
+
+    try {
+      const result = await normalizeTrack(trackQueries.getById(track.id), { transcode: true });
+
+      expect(result.status).toBe('failed');
+      const after = statSync(join(musicDir, 'doomed.mp3'));
+      expect(after.size).toBe(before.size);
+      expect(trackQueries.getById(track.id).filepath).toBe('doomed.mp3');
+      expect(existsSync(join(musicDir, 'doomed.m4a'))).toBe(false);
+      expect(readdirSync(musicDir).filter((name) => name.includes('.frag-'))).toEqual([]);
+    } finally {
+      config.transcodeTimeoutMs = 900_000;
+    }
+  });
+});
+
 describe('getPlayMeta / buildManifest', () => {
   it('reuses stored metadata while the file is unchanged', async () => {
     const track = freshTrack();
@@ -273,7 +369,10 @@ describe('getPlayMeta / buildManifest', () => {
     await normalizeTrack(trackQueries.getById(track.id));
 
     // One file per track: normalisation rewrites in place, so there are no segment dirs,
-    // manifests or temp files lying around next to the audio.
-    expect(readdirSync(musicDir).filter((name) => !name.endsWith('.m4a'))).toEqual([]);
+    // manifests or temp files lying around next to the audio. mp3 counts as audio here because the
+    // transcode tests keep their sources — a converted mp3 is deleted, an unconverted one is the
+    // library, not a leftover.
+    expect(readdirSync(musicDir).filter((name) => !/\.(m4a|mp3|flac|ogg|wav)$/.test(name))).toEqual([]);
+    expect(readdirSync(musicDir).filter((name) => name.includes('.frag-'))).toEqual([]);
   });
 });

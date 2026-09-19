@@ -15,6 +15,10 @@
  *   npm run v2convert -- --all                 also list tracks that are already fragment-ready
  *   npm run v2convert -- --json                one machine-readable summary line, no track output
  *
+ * `--transcode` is the destructive one: an mp3 (see TRANSCODE_FORMATS) is re-encoded to fragmented
+ * AAC and the original file is deleted, so it never runs unless you type it, and never at startup.
+ * Pair it with `--dry-run` and `--limit` before letting it near 1000 tracks.
+ *
  * Run it from anywhere: the npm script cd's into `backend` so the server's own `.env`
  * (MUSIC_DIR, DATABASE_PATH, FFMPEG_PATH…) applies. Safe alongside a running server — a converted
  * file lands as an atomic rename in the same directory, temp names are per-PID, and rows are
@@ -42,10 +46,10 @@ const valuesOf = (name) => {
   return out;
 };
 
-const KNOWN = ['dry-run', 'track', 'limit', 'concurrency', 'all', 'json', 'help'];
+const KNOWN = ['dry-run', 'track', 'limit', 'concurrency', 'all', 'json', 'transcode', 'bitrate', 'help'];
 const unknown = argv.filter((arg) => arg.startsWith('--') && !KNOWN.includes(arg.slice(2)));
 const USAGE = 'usage: npm run v2convert -- [--dry-run] [--track <id|file>] [--limit N]'
-  + ' [--concurrency N] [--all] [--json]';
+  + ' [--concurrency N] [--transcode [--bitrate 192k]] [--all] [--json]';
 if (unknown.length) {
   console.error(`Unknown option(s): ${unknown.join(', ')}\n${USAGE}`);
   process.exit(2);
@@ -63,12 +67,15 @@ if (argv.includes('--track') && !selectors.length) {
 const dryRun = has('dry-run');
 const showAll = has('all');
 const asJson = has('json');
+const transcode = has('transcode');
 
 // What each outcome is called, in this mode. The file being fragmented and the database row being
 // ready are different facts, and only one of them is worth a whole library scan to discover.
 const LABEL = {
   normalized: 'converted',
   'would-normalize': dryRun ? 'needs conversion' : 'converted',
+  transcoded: 'transcoded',
+  'would-transcode': dryRun ? 'needs transcode' : 'transcoded',
   metadata: dryRun ? 'needs metadata' : 'metadata refreshed',
   fragmented: 'fragment-ready',
   skipped: 'skipped',
@@ -82,6 +89,8 @@ process.env.LOG_LEVEL ||= 'error';
 const { default: config } = await import('../config/config.js');
 const { initDatabase, closeDatabase, trackQueries } = await import('../db/database.js');
 const { normalizeLibrary } = await import('../services/formatNormalizer.js');
+
+const bitrate = valueOf('bitrate', config.transcodeBitrate);
 
 await initDatabase();
 
@@ -122,6 +131,12 @@ if (!asJson) {
   console.log(`  music  ${config.musicDir}`);
   console.log(`  db     ${config.databasePath}`);
   console.log(`  ffmpeg ${config.ffmpegPath} · ffprobe ${config.ffprobePath}`);
+  if (transcode) console.log(`  output AAC at ${bitrate} · sources in ${config.transcodeFormats.join(', ')} are replaced`);
+}
+
+if (transcode && !dryRun && !asJson) {
+  console.log('\n  ⚠ --transcode re-encodes and DELETES the source: song.mp3 becomes song.m4a.');
+  console.log('    Lossy in, lossy out, no way back — pilot with --limit 5 first.');
 }
 
 const seenReasons = new Set();
@@ -145,6 +160,8 @@ try {
     concurrency: Number(valueOf('concurrency', 2)),
     onTrack: printer,
     ids,
+    transcode,
+    bitrate,
   });
 } catch (error) {
   if (asJson) console.log(JSON.stringify({ error: error.message }));
@@ -167,10 +184,21 @@ if (asJson) {
   process.exit(summary.failed > 0 ? 1 : 0);
 }
 
-const pending = (dryRun ? summary.wouldNormalize : summary.normalized) + summary.metadata;
+const humanBytes = (bytes) => {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Math.abs(bytes);
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value.toFixed(value >= 100 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+};
+
+const pending = (dryRun ? summary.wouldNormalize + summary.wouldTranscode : summary.normalized + summary.transcoded)
+  + summary.metadata;
 const parts = [`checked ${summary.checked}`];
 if (summary.normalized) parts.push(`converted ${summary.normalized}`);
+if (summary.transcoded) parts.push(`transcoded ${summary.transcoded}`);
 if (dryRun && summary.wouldNormalize) parts.push(`needs conversion ${summary.wouldNormalize}`);
+if (dryRun && summary.wouldTranscode) parts.push(`needs transcode ${summary.wouldTranscode}`);
 if (summary.metadata) {
   parts.push(dryRun ? `needs metadata ${summary.metadata}` : `metadata refreshed ${summary.metadata}`);
 }
@@ -188,8 +216,14 @@ if (/ENOENT|exited 127/.test(Object.keys(summary.reasons).join(' '))) {
 if (summary.failed > 0 && !dryRun) {
   console.log('  → failed tracks stay on the V1 player; nothing was written for them.');
 }
+if (summary.transcoded) {
+  console.log(summary.bytesFreed >= 0
+    ? `  → re-encoding freed ${humanBytes(summary.bytesFreed)} across ${summary.transcoded} track(s).`
+    : `  → re-encoding added ${humanBytes(-summary.bytesFreed)} across ${summary.transcoded} track(s).`);
+}
 if (dryRun && pending > 0) {
-  console.log(`\n  npm run v2convert   # apply those ${pending} (file rewrite + metadata)`);
+  const what = transcode ? 'rewrite + transcode + metadata' : 'file rewrite + metadata';
+  console.log(`\n  npm run v2convert${transcode ? ' -- --transcode' : ''}   # apply those ${pending} (${what})`);
 }
 if (!dryRun && summary.metadata) {
   console.log(`  → refreshed the metadata of ${summary.metadata} track(s) whose file was already fragmented.`);

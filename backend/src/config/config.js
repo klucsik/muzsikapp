@@ -54,6 +54,13 @@ const config = {
   normalizeTimeoutMs: parseInt(process.env.NORMALIZE_TIMEOUT_MS || '120000', 10),
   // Rewrites library files on startup scan; set false to index without touching disk
   normalizeOnStartup: process.env.NORMALIZE_ON_STARTUP !== 'false',
+  // Re-encoding is never automatic (see normalizeTrack). These are the defaults for whoever asks —
+  // `npm run v2convert -- --transcode`. Encoding is far slower than a remux: an hour of audio is
+  // minutes of CPU, so the timeout is generous.
+  transcodeFormats: (process.env.TRANSCODE_FORMATS || 'mp3')
+    .split(',').map((name) => name.trim().toLowerCase()).filter(Boolean),
+  transcodeBitrate: process.env.TRANSCODE_BITRATE || '192k',
+  transcodeTimeoutMs: parseInt(process.env.TRANSCODE_TIMEOUT_MS || '900000', 10),
 
   // External Links
   addMusicUrl: process.env.ADD_MUSIC_URL || '',

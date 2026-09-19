@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { rename, rm, stat } from 'fs/promises';
-import { join } from 'path';
+import { basename, dirname, extname, join } from 'path';
 import config from '../config/config.js';
 import logger from '../utils/logger.js';
 import { canonicalFormat } from '../utils/audioFormat.js';
@@ -12,8 +12,12 @@ import { scanMp4 } from '../utils/mp4Boxes.js';
  * second set of segment files around, tracks are normalised **in place** into fragmented
  * MP4 — still playable by the V1 element player, but now appendable to a SourceBuffer.
  *
- * Conversion is always `-c copy` (no re-encode). The original file is only replaced after
- * the remuxed output has been verified, so a failure can never destroy audio.
+ * Normalisation is `-c copy` (no re-encode): the original file is only replaced after the remuxed
+ * output has been verified, so a failure can never destroy audio.
+ *
+ * Transcoding an ordinary file (mp3) into fragmented AAC exists too, but it is opt-in per call:
+ * it is lossy twice over and it replaces the source, so nothing here does it unless a caller —
+ * today only `npm run v2convert -- --transcode` — asks in as many words.
  */
 
 const AAC_OBJECT_TYPE = {
@@ -26,16 +30,27 @@ const AAC_OBJECT_TYPE = {
   'HE-AAC v2': 29,
 };
 
-export function planNormalization(track) {
+/**
+ * Containers we are willing to re-encode. This is a decision, not a capability list: ffmpeg will
+ * decode anything you hand it, and that is exactly the problem — every one of these conversions
+ * throws away the source. mp3 is here because it is the library most people already have.
+ */
+const DEFAULT_TRANSCODE_FORMATS = ['mp3'];
+
+export function planNormalization(track, { transcode = false } = {}) {
   const format = canonicalFormat(track);
-  if (format !== 'm4a') {
-    return {
-      supported: false,
-      format,
-      reason: `Format "${format || 'unknown'}" is not fragmented-container-ready; play it with the V1 player`,
-    };
+  if (format === 'm4a') return { supported: true, format };
+
+  const allowed = config.transcodeFormats?.length ? config.transcodeFormats : DEFAULT_TRANSCODE_FORMATS;
+  if (transcode && allowed.includes(format)) {
+    return { supported: true, format, transcode: true };
   }
-  return { supported: true, format };
+
+  return {
+    supported: false,
+    format,
+    reason: `Format "${format || 'unknown'}" is not fragmented-container-ready; play it with the V1 player`,
+  };
 }
 
 function run(cmd, args, { timeoutMs } = {}) {
@@ -168,8 +183,13 @@ export async function normalizeTrack(track, options = {}) {
   }
 }
 
-async function runNormalization(track, { apply = true, fragmentDurationMs = config.fragmentDurationMs } = {}) {
-  const plan = planNormalization(track);
+async function runNormalization(track, {
+  apply = true,
+  fragmentDurationMs = config.fragmentDurationMs,
+  transcode = false,
+  bitrate = config.transcodeBitrate,
+} = {}) {
+  const plan = planNormalization(track, { transcode });
   if (!plan.supported) {
     return { status: 'skipped', reason: plan.reason };
   }
@@ -181,7 +201,9 @@ async function runNormalization(track, { apply = true, fragmentDurationMs = conf
   const scan = await scanMp4(filePath);
   const codec = await probeCodec(filePath);
 
-  if (!codec.mime) {
+  // A transcode does not care what the source codec is — ffmpeg decodes it — and an mp3 has no MSE
+  // media type to check. The probe that matters happens on the result.
+  if (!codec.mime && !plan.transcode) {
     return {
       status: 'skipped',
       reason: `audio codec "${codec.codecName}" has no verified MSE media type`,
@@ -208,6 +230,10 @@ async function runNormalization(track, { apply = true, fragmentDurationMs = conf
       meta,
       reason: track.mse_meta ? 'stored metadata out of date' : 'no stored metadata',
     };
+  }
+
+  if (plan.transcode) {
+    return transcodeTrack({ track, filePath, before, apply, bitrate, fragmentDurationMs, scan, codec });
   }
 
   if (!apply) {
@@ -290,6 +316,152 @@ async function runNormalization(track, { apply = true, fragmentDurationMs = conf
 }
 
 /**
+ * Re-encode a lossy source (mp3) straight into fragmented AAC, then move the track onto it.
+ *
+ * This is the one path here that destroys audio, so it borrows the remux rules and then some: the
+ * encoder writes to a temp file in the same directory, nothing is kept until the result has been
+ * scanned, probed and length-checked, the row is only moved once the new file is on disk, and a row
+ * that cannot be moved takes the new file back with it. The source is deleted last, which is the
+ * only order in which a crash leaves two files instead of none.
+ *
+ * Tags go with the source: ffmpeg maps the audio stream alone, and this app reads artwork from
+ * `tracks.youtube_thumbnail`, not from the file.
+ */
+async function transcodeTrack({ track, filePath, before, apply, bitrate, fragmentDurationMs, scan, codec }) {
+  if (!apply) {
+    return {
+      status: 'would-transcode',
+      reason: `${canonicalFormat(track) || 'audio'} → fragmented AAC at ${bitrate}`,
+    };
+  }
+
+  const durationSec = resolveDuration(scan, codec) || Number(track.duration) || 0;
+  const expectedFragments = Math.max(1, Math.ceil(durationSec / (fragmentDurationMs / 1000)));
+  const fragmentMicroseconds = Math.max(100_000, Math.round(fragmentDurationMs * 1000));
+  const tmpPath = `${filePath}.frag-${process.pid}-${Date.now()}.m4a`;
+
+  try {
+    await run(config.ffmpegPath, [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-y',
+      '-i', filePath,
+      '-map', '0:a:0',
+      '-c:a', 'aac',
+      '-b:a', String(bitrate),
+      '-movflags', '+empty_moov+default_base_moof',
+      '-frag_duration', String(fragmentMicroseconds),
+      tmpPath,
+    ], { timeoutMs: config.transcodeTimeoutMs });
+
+    const verifyScan = await scanMp4(tmpPath);
+    if (!verifyScan.fragmented || verifyScan.fragments.length === 0) {
+      throw new Error('transcoded file is not fragmented');
+    }
+    if (verifyScan.fragments.length > expectedFragments * 8) {
+      throw new Error(
+        `fragmented into ${verifyScan.fragments.length} pieces, expected about ${expectedFragments}`,
+      );
+    }
+    const verifyCodec = await probeCodec(tmpPath);
+    if (!verifyCodec.mime) throw new Error(`transcoded to ${verifyCodec.codecName}, not AAC`);
+
+    // Encoding must not change the length either. 1 % is room for AAC encoder delay and padding,
+    // not for a lost tail.
+    const actual = resolveDuration(verifyScan, verifyCodec);
+    if (Number.isFinite(durationSec) && Number.isFinite(actual)
+      && Math.abs(actual - durationSec) > Math.max(1, durationSec * 0.01)) {
+      throw new Error(
+        `duration changed after transcode: ${actual.toFixed(3)}s vs ${durationSec.toFixed(3)}s`,
+      );
+    }
+
+    const target = await playableTarget(track);
+    await rename(tmpPath, target.absolute);
+    const after = await stat(target.absolute);
+    const meta = metaFromScan(verifyScan, verifyCodec, fingerprintOf(after));
+
+    try {
+      await moveRow(track, target, meta);
+    } catch (error) {
+      // The source was never touched, so removing the new file puts the library back as it was.
+      await rm(target.absolute, { force: true });
+      throw new Error(`transcoded but the row could not be moved (${error.message}); ${target.relative} removed`);
+    }
+
+    if (target.absolute !== filePath) {
+      await rm(filePath, { force: true }).catch((error) => {
+        logger.warn(
+          { trackId: track.id, path: track.filepath, error: error.message },
+          'Transcode left the original file behind',
+        );
+      });
+    }
+
+    logger.info(
+      {
+        trackId: track.id,
+        from: track.filepath,
+        to: target.relative,
+        fragments: meta.fragmentCount,
+        bytes: `${before.size}→${after.size}`,
+      },
+      'Transcoded track to fragmented AAC',
+    );
+
+    return {
+      status: 'transcoded',
+      meta,
+      from: track.filepath,
+      to: target.relative,
+      bytesBefore: before.size,
+      bytesAfter: after.size,
+    };
+  } catch (error) {
+    await rm(tmpPath, { force: true }).catch(() => {});
+    logger.error({ trackId: track.id, error: error.message }, 'Transcode to fragmented AAC failed');
+    return { status: 'failed', reason: error.message };
+  }
+}
+
+/**
+ * Where a transcoded track goes: same folder, same name, `.m4a`. When that name is taken — by
+ * another row, or by a file the scanner has not met yet — a `.v2` suffix keeps both rather than
+ * overwriting somebody's audio.
+ */
+async function playableTarget(track) {
+  const { trackQueries } = await import('../db/database.js');
+  const dir = dirname(track.filepath);
+  const base = basename(track.filepath, extname(track.filepath));
+  const candidates = [
+    join(dir, `${base}.m4a`),
+    ...Array.from({ length: 20 }, (_, i) => join(dir, `${base}.v2${i ? `-${i + 1}` : ''}.m4a`)),
+  ];
+
+  for (const relative of candidates) {
+    const absolute = join(config.musicDir, relative);
+    const taken = (await stat(absolute).then(() => true, () => false)) || !!trackQueries.getByFilepath(relative);
+    if (!taken) return { relative, absolute };
+  }
+  throw new Error(`no free filename beside ${track.filepath}`);
+}
+
+/**
+ * Point the row at its new file. `format` is what the scanner would have written for an m4a, and
+ * `mse_meta` travels in the same statement so a moved row is never left without playback metadata.
+ */
+async function moveRow(track, target, meta) {
+  const { trackQueries } = await import('../db/database.js');
+  trackQueries.update(track.id, {
+    filepath: target.relative,
+    filename: basename(target.relative),
+    format: 'M4A/isom/iso2',
+    file_size: meta.fileSize,
+    mse_meta: JSON.stringify(meta),
+  });
+}
+
+/**
  * Does the row already hold exactly the metadata this scan produced? The fingerprint is
  * size+mtime, so a replaced or re-downloaded file fails it, and a META_VERSION bump refreshes
  * every row once instead of leaving stale byte ranges in the manifest.
@@ -358,13 +530,35 @@ export function buildManifest(track, meta) {
  * Normalise the whole library (startup path). Concurrency stays low: each conversion is a
  * full file rewrite, and the point is to not block playback while it runs.
  */
-export async function normalizeLibrary({ apply = true, limit = 100_000, concurrency = 2, onTrack = null, ids = null } = {}) {
+export async function normalizeLibrary({
+  apply = true,
+  limit = 100_000,
+  concurrency = 2,
+  onTrack = null,
+  ids = null,
+  transcode = false,
+  bitrate = config.transcodeBitrate,
+} = {}) {
   const { trackQueries } = await import('../db/database.js');
   // `ids` narrows the run to the tracks someone named (the CLI's --track); null is the whole library.
   const tracks = ids
     ? ids.map((id) => trackQueries.getById(id)).filter(Boolean)
     : trackQueries.getAll(limit, 0, 'created_at', 'asc').filter(Boolean);
-  const summary = { checked: 0, normalized: 0, metadata: 0, fragmented: 0, wouldNormalize: 0, skipped: 0, failed: 0, reasons: {} };
+  const summary = {
+    checked: 0,
+    normalized: 0,
+    transcoded: 0,
+    metadata: 0,
+    fragmented: 0,
+    wouldNormalize: 0,
+    wouldTranscode: 0,
+    skipped: 0,
+    failed: 0,
+    // What the re-encodes changed on disk: negative means the library grew. Only transcoded tracks
+    // move size, a remux is within a few percent of the source.
+    bytesFreed: 0,
+    reasons: {},
+  };
   const blame = (reason) => {
     const key = String(reason || 'unknown reason').slice(0, 160);
     summary.reasons[key] = (summary.reasons[key] || 0) + 1;
@@ -390,13 +584,18 @@ export async function normalizeLibrary({ apply = true, limit = 100_000, concurre
       const startedAt = Date.now();
       let result;
       try {
-        result = await normalizeTrack(track, { apply });
+        result = await normalizeTrack(track, { apply, transcode, bitrate });
       } catch (error) {
         logger.error({ trackId: track.id, error: error.message }, 'Normalisation threw');
         result = { status: 'failed', reason: error.message };
       }
 
       if (result.status === 'normalized') summary.normalized += 1;
+      else if (result.status === 'transcoded') {
+        summary.transcoded += 1;
+        summary.bytesFreed += (result.bytesBefore || 0) - (result.bytesAfter || 0);
+      }
+      else if (result.status === 'would-transcode') summary.wouldTranscode += 1;
       else if (result.status === 'metadata') summary.metadata += 1;
       else if (result.status === 'fragmented') summary.fragmented += 1;
       else if (result.status === 'would-normalize') summary.wouldNormalize += 1;
