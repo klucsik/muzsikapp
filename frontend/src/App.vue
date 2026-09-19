@@ -168,7 +168,6 @@ export default {
     const onCacheProgress = (coverage) => {
       cacheCoverage.value = coverage;
     };
-    // Mirror of the playlist panel's tracks, so the V2 player can warm the next track.
     const playlistTracks = ref([]);
     // Load saved room from localStorage or default to 'room-1'
     const savedRoomId = localStorage.getItem('rpg-music-room-id') || 'room-1';
@@ -177,10 +176,13 @@ export default {
     const libraryRef = ref(null);
     const folderManagerRef = ref(null);
     const playlistRef = ref(null);
+    // Mirror of the playlist panel's tracks, so the V2 player can warm the next track.
+    // Shallow: the panel replaces its array on every update, so a deep watch only added
+    // a thousand-object traversal per mutation.
     watch(
       () => playlistRef.value?.tracks,
       (tracks) => { playlistTracks.value = Array.isArray(tracks) ? [...tracks] : []; },
-      { deep: true, flush: 'post' },
+      { flush: 'post' },
     );
     const manageLibraryRef = ref(null);
     const showManageLibrary = ref(false);

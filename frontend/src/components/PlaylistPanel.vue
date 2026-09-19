@@ -179,10 +179,12 @@ const savingToFolder = ref(false);
 // Loop playlist state
 const loopPlaylist = ref(false);
 
-// Watch for track changes and emit update event
+// Watch for track changes and emit update event.
+// Shallow by design: every writer in useTrackCollection replaces the array wholesale,
+// so deep traversal of up to a thousand track objects per update bought nothing.
 watch(tracks, (newTracks) => {
   emit('playlist-updated', newTracks);
-}, { deep: true });
+});
 
 /**
  * Handle Save to Folder button click
