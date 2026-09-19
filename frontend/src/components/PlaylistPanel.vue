@@ -343,24 +343,25 @@ const toggleLoop = async () => {
  */
 const handleShuffle = async () => {
   if (isEmpty.value) return;
-  
+
   try {
-    // Create shuffled array of track IDs
+    // Fisher-Yates would be unbiased; the sort below is what the previous implementation used,
+    // kept so behaviour does not shift while the transport changes underneath it.
     const shuffled = [...tracks.value]
       .map((track, index) => ({ track, random: Math.random(), originalIndex: index }))
       .sort((a, b) => a.random - b.random);
-    
-    // Clear and re-add in new order
-    await clearTracks();
-    
-    const roomPlaylistId = playlistCollectionId.value;
-    for (const item of shuffled) {
-      await api.addTrackToCollection(roomPlaylistId, item.track.id);
-    }
-    
+
+    // One request replaces the queue: previously clear + one POST per track, each returning the
+    // whole collection and broadcasting a reload.
+    await api.loadTracksIntoCollection(playlistCollectionId.value, {
+      trackIds: shuffled.map((item) => item.track.id),
+      mode: 'replace',
+    });
+
     await refresh();
   } catch (err) {
     console.error('Failed to shuffle playlist:', err);
+    toast.error(`Could not shuffle the playlist: ${err.message}`);
   }
 };
 
@@ -384,14 +385,13 @@ const saveToFolder = async () => {
   
   savingToFolder.value = true;
   try {
-    // Clear folder first
-    await api.clearCollectionTracks(selectedFolderId.value);
-    
-    // Add all tracks from playlist
-    for (const track of tracks.value) {
-      await api.addTrackToCollection(selectedFolderId.value, track.id);
-    }
-    
+    // Replaces the folder's contents in one request instead of clearing it and posting every
+    // track, which left the folder visibly empty until the last response landed.
+    await api.loadTracksIntoCollection(selectedFolderId.value, {
+      trackIds: tracks.value.map((track) => track.id),
+      mode: 'replace',
+    });
+
     showSaveDialog.value = false;
     selectedFolderId.value = null;
   } catch (err) {
