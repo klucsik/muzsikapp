@@ -50,10 +50,11 @@ describe('useTrackCollection load races', () => {
     const current = loadCollection();        // folder-b asked for explicitly
 
     await settleAll();
+    // Every load asks for the list projection: rows never need per-fragment playback metadata.
     expect(calls.map((c) => c.url)).toEqual([
-      '/api/collections/folder-a?order_by=title&order_dir=asc',
-      '/api/collections/folder-b?order_by=title&order_dir=asc',
-      '/api/collections/folder-b?order_by=title&order_dir=asc', // the id watcher reloads as well
+      '/api/collections/folder-a?fields=list&order_by=title&order_dir=asc',
+      '/api/collections/folder-b?fields=list&order_by=title&order_dir=asc',
+      '/api/collections/folder-b?fields=list&order_by=title&order_dir=asc', // the id watcher reloads too
     ]);
 
     // Newest first, oldest last: the shape that overwrites state without a guard.
@@ -63,7 +64,7 @@ describe('useTrackCollection load races', () => {
     await Promise.all([stale, current]);
     await settleAll();
 
-    expect(tracks.value.map((t) => t.id)).toEqual(['track-of-/api/collections/folder-b?order_by=title&order_dir=asc']);
+    expect(tracks.value.map((t) => t.id)).toEqual(['track-of-/api/collections/folder-b?fields=list&order_by=title&order_dir=asc']);
     expect(loading.value).toBe(false);
   });
 
@@ -81,6 +82,20 @@ describe('useTrackCollection load races', () => {
 
     calls.forEach((c) => c.resolve([]));
     await Promise.all([first, second]);
+  });
+
+  it('can be asked for full track rows where the extra columns are needed', async () => {
+    const calls = deferredRequests();
+    const { loadCollection, tracks } = useTrackCollection('library', { autoLoad: false, listFields: false });
+
+    const load = loadCollection();
+    await settleAll();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).not.toContain('fields=list');
+
+    calls[0].resolve([{ id: 'full-row', filepath: '/music/t0.m4a' }]);
+    await load;
+    expect(tracks.value[0].filepath).toBe('/music/t0.m4a');
   });
 
   it('reports real failures but stays quiet about aborted loads', async () => {

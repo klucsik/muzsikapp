@@ -14,7 +14,10 @@ export function useTrackCollection(collectionId, options = {}) {
     webSocketEvents = [],
     orderBy = ref('title'),
     orderDir = ref('asc'),
-    searchQuery = ref('')
+    searchQuery = ref(''),
+    // Rows render a handful of columns; the server's full track row carries per-fragment
+    // playback metadata nobody in a list reads. Opt out where the extra fields are needed.
+    listFields = true
   } = options;
 
   // State
@@ -62,6 +65,7 @@ export function useTrackCollection(collectionId, options = {}) {
     try {
       // Build query params for ordering (library only) and search
       const params = new URLSearchParams();
+      if (listFields) params.append('fields', 'list');
       if (orderBy.value) params.append('order_by', orderBy.value);
       if (orderDir.value) params.append('order_dir', orderDir.value);
       if (searchQuery.value) params.append('search', searchQuery.value);

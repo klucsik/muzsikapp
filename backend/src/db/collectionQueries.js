@@ -6,15 +6,31 @@
 import logger from '../utils/logger.js';
 
 /**
+ * Columns a rendered track row needs. `mse_meta` is deliberately excluded: it holds one entry per
+ * stream fragment, so it accounts for most of the payload, and the only consumer that needs it (the
+ * manifest route) reads the track directly rather than from a collection response.
+ */
+const LIST_COLUMNS = [
+  't.id', 't.title', 't.artist', 't.album', 't.duration', 't.format',
+  't.file_size', 't.youtube_thumbnail', 't.youtube_video_id',
+];
+
+/** Resolve the requested projection into a SELECT list. */
+function trackColumns(fields) {
+  return fields === 'list' ? LIST_COLUMNS.join(', ') : 't.*';
+}
+
+/**
  * Get a collection by ID with its tracks
  * @param {Object} db - Database instance
  * @param {string} collectionId - Collection ID
  * @param {string} orderBy - Order field for library: 'title', 'artist', 'album', 'created_at'
  * @param {string} orderDir - Order direction: 'asc', 'desc'
  * @param {string} searchQuery - Optional search query to filter tracks
+ * @param {string} fields - 'full' (default) or 'list' for row-rendering columns only
  * @returns {Object|null} Collection with tracks array
  */
-function getCollection(db, collectionId, orderBy = 'title', orderDir = 'asc', searchQuery = '') {
+function getCollection(db, collectionId, orderBy = 'title', orderDir = 'asc', searchQuery = '', fields = 'full') {
   try {
     // Get collection metadata
     const collection = db.prepare(`
@@ -55,7 +71,7 @@ function getCollection(db, collectionId, orderBy = 'title', orderDir = 'asc', se
       // Library shows all tracks with custom ordering
       tracks = db.prepare(`
         SELECT 
-          t.*,
+          ${trackColumns(fields)},
           ct.position,
           ct.added_at
         FROM tracks t
@@ -80,7 +96,7 @@ function getCollection(db, collectionId, orderBy = 'title', orderDir = 'asc', se
       
       tracks = db.prepare(`
         SELECT 
-          t.*,
+          ${trackColumns(fields)},
           ct.position,
           ct.added_at
         FROM collection_tracks ct

@@ -108,8 +108,10 @@ export default () => {
       const orderBy = req.query.order_by || 'title';
       const orderDir = req.query.order_dir || 'asc';
       const searchQuery = req.query.search || '';
-      
-      const collection = collectionQueries.getCollection(db, req.params.id, orderBy, orderDir, searchQuery);
+      // fields=list returns only the columns a rendered row needs; see LIST_COLUMNS.
+      const fields = req.query.fields === 'list' ? 'list' : 'full';
+
+      const collection = collectionQueries.getCollection(db, req.params.id, orderBy, orderDir, searchQuery, fields);
       if (!collection) {
         return res.status(404).json({ error: 'Collection not found' });
       }
