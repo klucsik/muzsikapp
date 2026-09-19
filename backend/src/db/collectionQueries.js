@@ -6,15 +6,31 @@
 import logger from '../utils/logger.js';
 
 /**
+ * Columns a rendered track row needs. `mse_meta` is deliberately excluded: it holds one entry per
+ * stream fragment, so it accounts for most of the payload, and the only consumer that needs it (the
+ * manifest route) reads the track directly rather than from a collection response.
+ */
+const LIST_COLUMNS = [
+  't.id', 't.title', 't.artist', 't.album', 't.duration', 't.format',
+  't.file_size', 't.youtube_thumbnail', 't.youtube_video_id',
+];
+
+/** Resolve the requested projection into a SELECT list. */
+function trackColumns(fields) {
+  return fields === 'list' ? LIST_COLUMNS.join(', ') : 't.*';
+}
+
+/**
  * Get a collection by ID with its tracks
  * @param {Object} db - Database instance
  * @param {string} collectionId - Collection ID
  * @param {string} orderBy - Order field for library: 'title', 'artist', 'album', 'created_at'
  * @param {string} orderDir - Order direction: 'asc', 'desc'
  * @param {string} searchQuery - Optional search query to filter tracks
+ * @param {string} fields - 'full' (default) or 'list' for row-rendering columns only
  * @returns {Object|null} Collection with tracks array
  */
-function getCollection(db, collectionId, orderBy = 'title', orderDir = 'asc', searchQuery = '') {
+function getCollection(db, collectionId, orderBy = 'title', orderDir = 'asc', searchQuery = '', fields = 'full') {
   try {
     // Get collection metadata
     const collection = db.prepare(`
@@ -55,7 +71,7 @@ function getCollection(db, collectionId, orderBy = 'title', orderDir = 'asc', se
       // Library shows all tracks with custom ordering
       tracks = db.prepare(`
         SELECT 
-          t.*,
+          ${trackColumns(fields)},
           ct.position,
           ct.added_at
         FROM tracks t
@@ -80,7 +96,7 @@ function getCollection(db, collectionId, orderBy = 'title', orderDir = 'asc', se
       
       tracks = db.prepare(`
         SELECT 
-          t.*,
+          ${trackColumns(fields)},
           ct.position,
           ct.added_at
         FROM collection_tracks ct
@@ -242,6 +258,73 @@ function deleteCollection(db, collectionId) {
     stmt.run(collectionId);
   } catch (error) {
     logger.error('Error deleting collection:', error);
+    throw error;
+  }
+}
+
+/**
+ * Add many tracks to a collection in a single transaction.
+ *
+ * The per-track endpoint made "play folder" one HTTP request and one broadcast per track, each
+ * returning the whole collection; this is the path that collapses that burst into one round trip.
+ *
+ * @param {Object} db - Database instance
+ * @param {string} collectionId - Target collection ID
+ * @param {Array<string>} trackIds - Track IDs to append, in order (ignored when sourceCollectionId is set)
+ * @param {Object} options - { mode: 'append'|'replace', sourceCollectionId: string|null }
+ * @returns {Object} Updated collection plus how many rows were added and which ids were skipped
+ */
+function addTracks(db, collectionId, trackIds = [], { mode = 'append', sourceCollectionId = null } = {}) {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const result = { added: 0, skipped: [] };
+
+    const bulkTransaction = db.transaction(() => {
+      if (mode === 'replace') {
+        db.prepare('DELETE FROM collection_tracks WHERE collection_id = ?').run(collectionId);
+      }
+
+      const startRow = db.prepare(`
+        SELECT COALESCE(MAX(position), -1) as max_pos FROM collection_tracks WHERE collection_id = ?
+      `).get(collectionId).max_pos;
+
+      // Copying another collection keeps its ordering without shipping its track list to the
+      // client first, so a folder load costs no payload at all until the response.
+      if (sourceCollectionId) {
+        const copied = db.prepare(`
+          INSERT INTO collection_tracks (collection_id, track_id, position, added_at)
+          SELECT ?, ct.track_id, ? + ct.position + 1, ?
+          FROM collection_tracks ct
+          WHERE ct.collection_id = ?
+            AND EXISTS (SELECT 1 FROM tracks t WHERE t.id = ct.track_id)
+          ORDER BY ct.position ASC
+        `).run(collectionId, startRow, now, sourceCollectionId);
+        result.added = copied.changes;
+        return;
+      }
+
+      const exists = db.prepare('SELECT 1 FROM tracks WHERE id = ?');
+      const insert = db.prepare(`
+        INSERT INTO collection_tracks (collection_id, track_id, position, added_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      trackIds.forEach((trackId, index) => {
+        if (!trackId || !exists.get(trackId)) {
+          result.skipped.push(trackId);
+          return;
+        }
+        insert.run(collectionId, trackId, startRow + index + 1, now);
+        result.added += 1;
+      });
+    });
+
+    bulkTransaction();
+
+    db.prepare('UPDATE track_collections SET updated_at = ? WHERE id = ?').run(now, collectionId);
+
+    return { ...getCollection(db, collectionId), ...result };
+  } catch (error) {
+    logger.error('Error adding tracks to collection:', error);
     throw error;
   }
 }
@@ -537,7 +620,7 @@ function clearTracks(db, collectionId) {
  * @param {number} offset - Offset for pagination
  * @returns {Object} Tracks and total count
  */
-function getCollectionTracks(db, collectionId, limit = 50, offset = 0) {
+function getCollectionTracks(db, collectionId, limit = 50, offset = 0, fields = 'full') {
   try {
     const collection = db.prepare(`
       SELECT * FROM track_collections WHERE id = ?
@@ -556,7 +639,7 @@ function getCollectionTracks(db, collectionId, limit = 50, offset = 0) {
       
       tracks = db.prepare(`
         SELECT 
-          t.*,
+          ${trackColumns(fields)},
           ct.position,
           ct.added_at
         FROM tracks t
@@ -574,7 +657,7 @@ function getCollectionTracks(db, collectionId, limit = 50, offset = 0) {
 
       tracks = db.prepare(`
         SELECT 
-          t.*,
+          ${trackColumns(fields)},
           ct.position,
           ct.added_at
         FROM collection_tracks ct
@@ -599,6 +682,7 @@ export {
   updateCollection,
   deleteCollection,
   addTrack,
+  addTracks,
   removeTrack,
   reorderTrack,
   clearTracks,

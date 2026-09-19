@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import config from './config/config.js';
 import logger from './utils/logger.js';
-import { initDatabase, closeDatabase } from './db/database.js';
+import { initDatabase, closeDatabase, trackQueries } from './db/database.js';
 import { authOptional } from './middleware/auth.js';
 import authRoutes from './routes/auth.js';
 import systemRoutes from './routes/system.js';
@@ -15,6 +15,7 @@ import scannerRoutes from './routes/scanner.js';
 import playbackRoutes from './routes/playback.js';
 import folderRoutes from './routes/folders.js';
 import collectionsRoutes from './routes/collections.js';
+import { flushPlaylistUpdates } from './routes/collections.js';
 import downloadsRoutes from './routes/downloads.js';
 import { scanMusicLibrary } from './scanner/fileScanner.js';
 import { initWebSocket, closeWebSocket, getClientCount } from './websocket/socketServer.js';
@@ -179,6 +180,17 @@ async function start() {
     
     // File watcher disabled - library updates happen on startup scan and through download queue
     logger.info('File watcher disabled - library synced on startup and through downloads');
+
+    // Preparing tracks for the V2 player is not a startup job. Conversion rewrites library files,
+    // and booting a container is not consent to do that. Each import is converted by the download
+    // queue, each track someone actually plays is converted by the manifest route, and the whole
+    // library is converted on purpose with `npm run v2convert`. Startup keeps the pointer, because
+    // the only symptom of an unprepared track used to be the UI quietly playing it on V1.
+    const unprepared = trackQueries.countWithoutPlayMeta();
+    if (unprepared > 0) {
+      logger.info(`${unprepared} of ${trackQueries.count()} track(s) have no V2 playback metadata — `
+        + 'they play on V1 until `npm run v2convert`, or their own first play, converts them');
+    }
   } catch (error) {
     logger.error({ error }, 'Failed to start server');
     process.exit(1);
@@ -190,7 +202,10 @@ async function start() {
  */
 async function shutdown() {
   logger.info('Shutting down gracefully...');
-  
+
+  // Push any coalesced playlist update before the sockets go away
+  flushPlaylistUpdates();
+
   // Close WebSocket server
   closeWebSocket();
   

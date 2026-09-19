@@ -555,9 +555,11 @@ export default {
         audioElement.value.load();
       }
       
-      // Clear loop points when a new track starts to prevent cross-track contamination
-      loopStart.value = null;
-      loopEnd.value = null;
+      // A loop region belongs to the track that was looped. The server now sends the region for
+      // the track it just started (null once playback moves on), so mirror it instead of guessing
+      // — and keep clearing for payloads from a server that does not send the fields.
+      loopStart.value = typeof data.loopStart === 'number' ? data.loopStart : null;
+      loopEnd.value = typeof data.loopEnd === 'number' ? data.loopEnd : null;
       
       audioElement.value.currentTime = data.startPosition;
       
@@ -924,6 +926,9 @@ audio {
 
 .progress-bar {
   height: 8px;
+  /* Column flex parent + no in-flow content means a tight container shrinks this to zero height,
+     which silently kills the double-click-to-seek target. */
+  flex-shrink: 0;
   background: #1a1a1a;
   border-radius: 4px;
   cursor: pointer;

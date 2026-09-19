@@ -13,30 +13,64 @@ import { authRequired } from '../middleware/auth.js';
 const router = express.Router();
 
 /**
+ * Broadcast window for playlist updates. Mutations arrive in bursts when the client
+ * appends many tracks at once, and each broadcast makes every listener reload the whole
+ * playlist, so one event per window is enough to keep everyone in sync.
+ */
+const PLAYLIST_UPDATE_DEBOUNCE_MS = Number(process.env.PLAYLIST_UPDATE_DEBOUNCE_MS || 150);
+
+/** Pending broadcasts keyed by collection ID. */
+const pendingUpdates = new Map();
+
+const broadcastPlaylistUpdate = (collectionId) => {
+  try {
+    const io = getIO();
+    if (!io) return;
+    // Extract room ID if this is a room-specific playlist
+    const roomMatch = collectionId.match(/^current-playlist-room-(\d+)$/);
+    if (roomMatch) {
+      const roomId = `room-${roomMatch[1]}`;
+      io.to(roomId).emit('playlist_update', { collectionId, roomId });
+      logger.debug({ event: 'playlist_update', roomId, collectionId }, 'Broadcasting playlist update to room');
+    } else {
+      // Legacy 'current-playlist' - broadcast to all
+      io.emit('playlist_update', { collectionId });
+      logger.debug({ event: 'playlist_update', collectionId }, 'Broadcasting playlist update to all clients');
+    }
+  } catch (err) {
+    logger.error({ error: err }, 'Failed to emit playlist update');
+  }
+};
+
+/**
  * Emit playlist update event if collection is the current playlist
  * Supports both legacy 'current-playlist' and room-specific playlists
+ *
+ * Coalesced per collection: a burst of mutations results in a single broadcast.
  */
-const emitPlaylistUpdate = (collectionId) => {
+export const emitPlaylistUpdate = (collectionId) => {
   // Check if this is a current playlist (legacy or room-specific)
-  if (collectionId === 'current-playlist' || collectionId.startsWith('current-playlist-room-')) {
-    try {
-      const io = getIO();
-      if (io) {
-        // Extract room ID if this is a room-specific playlist
-        const roomMatch = collectionId.match(/^current-playlist-room-(\d+)$/);
-        if (roomMatch) {
-          const roomId = `room-${roomMatch[1]}`;
-          io.to(roomId).emit('playlist_update', { collectionId, roomId });
-          logger.info({ event: 'playlist_update', roomId, collectionId }, '📢 Broadcasting playlist update to room');
-        } else {
-          // Legacy 'current-playlist' - broadcast to all
-          io.emit('playlist_update', { collectionId });
-          logger.info({ event: 'playlist_update', collectionId }, '📢 Broadcasting playlist update to all clients');
-        }
-      }
-    } catch (err) {
-      logger.error({ error: err }, 'Failed to emit playlist update');
-    }
+  if (collectionId !== 'current-playlist' && !collectionId.startsWith('current-playlist-room-')) {
+    return;
+  }
+
+  if (pendingUpdates.has(collectionId)) return;
+
+  const timer = setTimeout(() => {
+    pendingUpdates.delete(collectionId);
+    broadcastPlaylistUpdate(collectionId);
+  }, PLAYLIST_UPDATE_DEBOUNCE_MS);
+  // Never hold the event loop open for a broadcast we can afford to drop on shutdown.
+  timer.unref?.();
+  pendingUpdates.set(collectionId, timer);
+};
+
+/** Flush any pending broadcasts immediately (used by tests and graceful shutdown). */
+export const flushPlaylistUpdates = () => {
+  for (const [collectionId, timer] of pendingUpdates) {
+    clearTimeout(timer);
+    pendingUpdates.delete(collectionId);
+    broadcastPlaylistUpdate(collectionId);
   }
 };
 
@@ -74,8 +108,10 @@ export default () => {
       const orderBy = req.query.order_by || 'title';
       const orderDir = req.query.order_dir || 'asc';
       const searchQuery = req.query.search || '';
-      
-      const collection = collectionQueries.getCollection(db, req.params.id, orderBy, orderDir, searchQuery);
+      // fields=list returns only the columns a rendered row needs; see LIST_COLUMNS.
+      const fields = req.query.fields === 'list' ? 'list' : 'full';
+
+      const collection = collectionQueries.getCollection(db, req.params.id, orderBy, orderDir, searchQuery, fields);
       if (!collection) {
         return res.status(404).json({ error: 'Collection not found' });
       }
@@ -226,6 +262,52 @@ export default () => {
       res.json(collection);
     } catch (error) {
       console.error('Error adding track to collection:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/collections/:id/tracks/bulk
+   * Append many tracks, or copy another collection, in one transaction and one broadcast.
+   * Body: { track_ids: string[] } | { from: sourceCollectionId }, plus optional
+   *       { mode: 'append' | 'replace' } (default append).
+   * Auth: Required for folders, optional for playlists (including room playlists)
+   */
+  router.post('/:id/tracks/bulk', (req, res) => {
+    try {
+      const db = getDb();
+      const collectionId = req.params.id;
+      const isPlaylist = collectionId === 'current-playlist' || collectionId.startsWith('current-playlist-room-');
+
+      if (!isPlaylist && !req.user) {
+        return res.status(401).json({ error: 'Authentication required for folder operations' });
+      }
+
+      const { track_ids: trackIds, from, mode = 'append' } = req.body || {};
+
+      if (!Array.isArray(trackIds) && !from) {
+        return res.status(400).json({ error: 'track_ids array or from collection is required' });
+      }
+      if (Array.isArray(trackIds) && trackIds.length > 5000) {
+        return res.status(400).json({ error: 'too many tracks in one request (max 5000)' });
+      }
+      if (mode !== 'append' && mode !== 'replace') {
+        return res.status(400).json({ error: "mode must be 'append' or 'replace'" });
+      }
+      if (from && !collectionQueries.getCollection(db, from)) {
+        return res.status(404).json({ error: 'Source collection not found' });
+      }
+
+      const collection = collectionQueries.addTracks(db, collectionId, trackIds || [], {
+        mode,
+        sourceCollectionId: from || null,
+      });
+
+      emitPlaylistUpdate(collectionId);
+
+      res.json(collection);
+    } catch (error) {
+      logger.error({ error, collectionId: req.params.id }, 'Error bulk adding tracks to collection');
       res.status(500).json({ error: error.message });
     }
   });

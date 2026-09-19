@@ -418,15 +418,11 @@ const deleteFolder = async () => {
  */
 const playFolder = async (folder) => {
   try {
-    // Clear current room's playlist and add all folder tracks
-    const roomPlaylistId = playlistCollectionId.value;
-    await api.clearCollectionTracks(roomPlaylistId);
-    const folderData = await api.getCollection(folder.id);
-    for (const track of folderData.tracks) {
-      await api.addTrackToCollection(roomPlaylistId, track.id);
-    }
+    // One request: the server copies the folder into this room's playlist, replacing it.
+    await api.loadTracksIntoCollection(playlistCollectionId.value, { from: folder.id, mode: 'replace' });
   } catch (err) {
     console.error('Failed to play folder:', err);
+    toast.error(`Could not load ${folder.name}: ${err.message}`);
   }
 };
 
@@ -435,13 +431,10 @@ const playFolder = async (folder) => {
  */
 const addFolderToPlaylist = async (folder) => {
   try {
-    const roomPlaylistId = playlistCollectionId.value;
-    const folderData = await api.getCollection(folder.id);
-    for (const track of folderData.tracks) {
-      await api.addTrackToCollection(roomPlaylistId, track.id);
-    }
+    await api.loadTracksIntoCollection(playlistCollectionId.value, { from: folder.id });
   } catch (err) {
     console.error('Failed to add folder to playlist:', err);
+    toast.error(`Could not add ${folder.name}: ${err.message}`);
   }
 };
 

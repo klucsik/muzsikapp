@@ -18,6 +18,18 @@
             <span class="client-count" v-if="room.clientCount > 0">{{ room.clientCount }}</span>
           </button>
         </div>
+
+        <div class="player-mode-toggle">
+          <button
+            :class="['mode-btn', { active: playerMode === 'v1' }]"
+            @click="setPlayerMode('v1')"
+          >V1</button>
+          <button
+            :class="['mode-btn', { active: playerMode === 'v2' }]"
+            @click="setPlayerMode('v2')"
+          >V2</button>
+        </div>
+
         <div class="stats">
           <span class="stat">{{ stats.tracks }} tracks</span>
           <span class="stat">{{ stats.clients }} clients</span>
@@ -32,11 +44,23 @@
         <!-- Left: Audio Player -->
         <div class="player-column">
           <AudioPlayer 
+            v-if="playerMode === 'v1'"
             :current-track-id="currentTrackId"
             :has-next="hasNext"
             :has-previous="hasPrevious"
             @next-track="playNextTrack"
             @previous-track="playPreviousTrack"
+          />
+          <AudioPlayerV2 
+            v-else
+            :playlist="playlistTracks"
+            :current-track-id="currentTrackId"
+            :has-next="hasNext"
+            :has-previous="hasPrevious"
+            @next-track="playNextTrack"
+            @previous-track="playPreviousTrack"
+            @fallback-v1="setPlayerMode('v1')"
+            @cache-progress="onCacheProgress"
           />
         </div>
 
@@ -46,6 +70,7 @@
             ref="playlistRef"
             :current-track="currentTrack"
             :is-authenticated="isAuthenticated"
+            :cache-coverage="cacheCoverage"
             @track-play="onPlayTrack"
           />
         </div>
@@ -59,6 +84,7 @@
             ref="libraryRef"
             :current-track="currentTrack"
             :is-authenticated="isAuthenticated"
+            :cache-coverage="cacheCoverage"
             @track-play="onAddTrackAndPlay"
             @open-manage-library="openManageLibrary"
           />
@@ -94,8 +120,9 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import AudioPlayer from './components/AudioPlayer.vue';
+import AudioPlayerV2 from './components/AudioPlayerV2.vue';
 import MusicLibraryPanel from './components/MusicLibraryPanel.vue';
 import FolderManagerPanel from './components/FolderManagerPanel.vue';
 import PlaylistPanel from './components/PlaylistPanel.vue';
@@ -111,6 +138,7 @@ export default {
   name: 'App',
   components: {
     AudioPlayer,
+    AudioPlayerV2,
     MusicLibraryPanel,
     FolderManagerPanel,
     PlaylistPanel,
@@ -123,8 +151,24 @@ export default {
     const { initialize: initializeAuth, isAuthenticated, logout } = useAuth();
     const toast = useToast();
     
+    const playerMode = ref(localStorage.getItem('muzsikapp-player-mode') || 'v1');
+    const setPlayerMode = async (mode) => {
+      playerMode.value = mode;
+      localStorage.setItem('muzsikapp-player-mode', mode);
+      // The freshly mounted player has no idea what the room is doing, so ask the server.
+      await nextTick();
+      websocket.requestState();
+    };
+
     const currentTrackId = ref(null);
     const currentTrack = ref(null);
+    // Fragment coverage reported by the V2 player, `{ [trackId]: { cached, total, bytes } }`.
+    // The lists draw a cache strip from it; V1 never emits, so it stays empty there.
+    const cacheCoverage = ref({});
+    const onCacheProgress = (coverage) => {
+      cacheCoverage.value = coverage;
+    };
+    const playlistTracks = ref([]);
     // Load saved room from localStorage or default to 'room-1'
     const savedRoomId = localStorage.getItem('rpg-music-room-id') || 'room-1';
     const currentRoomId = ref(savedRoomId);
@@ -132,6 +176,14 @@ export default {
     const libraryRef = ref(null);
     const folderManagerRef = ref(null);
     const playlistRef = ref(null);
+    // Mirror of the playlist panel's tracks, so the V2 player can warm the next track.
+    // Shallow: the panel replaces its array on every update, so a deep watch only added
+    // a thousand-object traversal per mutation.
+    watch(
+      () => playlistRef.value?.tracks,
+      (tracks) => { playlistTracks.value = Array.isArray(tracks) ? [...tracks] : []; },
+      { flush: 'post' },
+    );
     const manageLibraryRef = ref(null);
     const showManageLibrary = ref(false);
     const stats = ref({
@@ -161,9 +213,11 @@ export default {
           playlistIndex = playlistIndex >= 0 ? playlistIndex : null;
         }
         
+        console.log('[App] playTrack called — track:', track?.id, 'playerMode:', playerMode.value);
         await api.playTrack(track.id, 0, currentRoomId.value, playlistIndex);
         currentTrackId.value = track.id;
         currentTrack.value = track;
+        console.log('[App] currentTrackId set to:', currentTrackId.value);
       } catch (error) {
         console.error('Failed to play track:', error);
         toast.error('Failed to play track. Check console for details.');
@@ -226,9 +280,11 @@ export default {
     };
 
     const handlePlayTrack = (data) => {
+      console.log('[App] WS play_track event:', data?.trackId, 'playerMode:', playerMode?.value);
       // Only update if it's for current room or no room specified
       if (!data.roomId || data.roomId === currentRoomId.value) {
         currentTrackId.value = data.trackId;
+        console.log('[App] WS handler set currentTrackId to:', data.trackId);
         // Fetch full track info if needed
         if (data.trackId) {
           api.getTrack(data.trackId)
@@ -408,6 +464,11 @@ export default {
     });
 
     return {
+      playerMode,
+      setPlayerMode,
+      cacheCoverage,
+      onCacheProgress,
+      playlistTracks,
       currentTrackId,
       currentTrack,
       currentRoomId,
@@ -920,5 +981,42 @@ body {
     flex-shrink: 0;
     width: 100%;
   }
+
+  .player-mode-toggle {
+    order: -1;
+    margin-bottom: var(--spacing-md);
+  }
+}
+
+/* =====================================================
+   PLAYER MODE TOGGLE
+   ===================================================== */
+.player-mode-toggle {
+  display: flex;
+  background: #1a1a1a;
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+
+.mode-btn {
+  padding: var(--spacing-xs) var(--spacing-md);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: #999;
+  font-size: 0.85em;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-btn:hover {
+  color: #fff;
+}
+
+.mode-btn.active {
+  background: var(--color-primary);
+  color: white;
 }
 </style>

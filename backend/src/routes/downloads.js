@@ -18,7 +18,7 @@ const router = express.Router();
  */
 router.get('/search', async (req, res) => {
   try {
-    const { q: query, limit = 10 } = req.query;
+    const { q: query, limit = 10, offset = 0 } = req.query;
     
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
       return res.status(400).json({
@@ -32,15 +32,27 @@ router.get('/search', async (req, res) => {
         error: 'Limit must be between 1 and 50',
       });
     }
+
+    // Paging asks yt-dlp for limit+offset rows and slices, so bound the total it has to walk.
+    const offsetNum = parseInt(offset, 10);
+    if (isNaN(offsetNum) || offsetNum < 0 || offsetNum + limitNum > 100) {
+      return res.status(400).json({
+        error: 'Offset must keep the requested page within the first 100 results',
+      });
+    }
     
-    logger.info({ query, limit: limitNum }, 'YouTube search requested');
+    logger.info({ query, limit: limitNum, offset: offsetNum }, 'YouTube search requested');
     
-    const results = await searchYouTube(query, limitNum);
+    const results = await searchYouTube(query, limitNum, offsetNum);
     
     res.json({
       query,
       results,
       count: results.length,
+      offset: offsetNum,
+      // A short page means YouTube ran out of results, which is how the client knows to stop
+      // offering "load more".
+      has_more: results.length === limitNum,
     });
     
   } catch (error) {

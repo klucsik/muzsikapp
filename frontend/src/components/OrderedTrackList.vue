@@ -105,6 +105,14 @@
         >
           ×
         </button>
+
+        <!-- How much of this track the browser still holds; shrinks back when bytes are evicted -->
+        <div
+          v-if="cacheBars[index]"
+          class="cache-progress"
+          :style="{ width: cacheBars[index].width }"
+          :title="cacheBars[index].title"
+        ></div>
       </div>
 
       <!-- Drop indicator for end of list -->
@@ -153,6 +161,12 @@ const props = defineProps({
   enableSingleClick: {
     type: Boolean,
     default: false
+  },
+  // `{ [trackId]: { cached, total, bytes } }` from useMseBuffer; omitted where there is no
+  // fragment cache to report on (V1, folders), and those lists simply draw no strip.
+  cacheCoverage: {
+    type: Object,
+    default: () => ({})
   }
 });
 
@@ -169,6 +183,23 @@ const draggedTrack = ref(null);
 const draggedIndex = ref(null);
 const dragOverIndex = ref(null);
 const dragOverBottom = ref(false);
+
+/**
+ * Cache strip geometry per visible track, in list order. Tracks with no known fragment count —
+ * never fetched, or a V1-only library — stay out of here so the item renders untouched rather
+ * than with an empty bar.
+ */
+const cacheBars = computed(() => props.tracks.map((track) => {
+  const info = props.cacheCoverage[track.id];
+  if (!info || !info.total) return null;
+  const percent = Math.min(100, Math.round((info.cached / info.total) * 100));
+  if (percent <= 0) return null;
+  const mb = (info.bytes / 1048576).toFixed(1);
+  return {
+    width: `${percent}%`,
+    title: `${info.cached}/${info.total} fragments cached (${mb} MB)`,
+  };
+}));
 
 /**
  * Check if a track is currently playing
@@ -468,6 +499,20 @@ const handleContainerDrop = (event) => {
 
 .track-item.playing:hover {
   background: rgba(76, 175, 80, 0.3);
+}
+
+/* Cache coverage along the bottom edge: the same grey the seek bar uses for buffered audio, so
+   "bytes I already have" looks the same in both places. One colour is enough — a full strip is a
+   full strip. */
+.cache-progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: rgba(158, 158, 158, 0.55);
+  border-radius: 0 2px 2px 0;
+  pointer-events: none;
+  transition: width 0.3s ease;
 }
 
 .track-item.dragging {

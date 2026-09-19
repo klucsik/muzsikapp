@@ -3,11 +3,22 @@ import logger from '../utils/logger.js';
 import config from '../config/config.js';
 import SyncController from './syncController.js';
 import roomStateManager from './roomState.js';
-import { collectionQueries } from '../db/database.js';
 
 let io = null;
 let syncController = null;
 const connectedClients = new Map();
+
+/**
+ * Tell a socket which playlist it should load.
+ *
+ * Deliberately the same shape as the mutation broadcast in routes/collections.js: sending the
+ * track rows here capped the playlist at 1000 entries and shipped per-fragment playback metadata
+ * to every connection, while the client's handler ignored the array form altogether and refetched
+ * over HTTP anyway.
+ */
+function sendPlaylistSignal(socket, collectionId, roomId) {
+  socket.emit('playlist_update', roomId ? { collectionId, roomId } : { collectionId });
+}
 
 /**
  * Initialize WebSocket server
@@ -50,10 +61,8 @@ export function initWebSocket(httpServer) {
     // Send current state to new client
     socket.emit('state_sync', syncController.getState(defaultRoom.id));
     
-    // Send current playlist for the room
-    const playlistResult = collectionQueries.getCollectionTracks(defaultRoom.playlistCollectionId, 1000, 0);
-    const playlist = playlistResult.tracks || [];
-    socket.emit('playlist_update', playlist);
+    // Point the client at this room's playlist; it loads the rows itself
+    sendPlaylistSignal(socket, defaultRoom.playlistCollectionId, defaultRoom.id);
     
     // Send room info
     socket.emit('room_joined', {
@@ -65,7 +74,7 @@ export function initWebSocket(httpServer) {
     // Send all rooms info
     socket.emit('rooms_info', roomStateManager.getAllRooms());
     
-    logger.debug({ clientId, roomId: defaultRoom.id, playlistLength: playlist.length }, 'Sent initial state to new client');
+    logger.debug({ clientId, roomId: defaultRoom.id, collectionId: defaultRoom.playlistCollectionId }, 'Sent initial state to new client');
 
     // Handle room join request
     socket.on('join_room', (data) => {
@@ -92,10 +101,8 @@ export function initWebSocket(httpServer) {
         // Send room state to client
         socket.emit('state_sync', syncController.getState(roomId));
         
-        // Send room playlist
-        const playlistResult = collectionQueries.getCollectionTracks(room.playlistCollectionId, 1000, 0);
-        const playlist = playlistResult.tracks || [];
-        socket.emit('playlist_update', playlist);
+        // Point the client at the room's playlist
+        sendPlaylistSignal(socket, room.playlistCollectionId, roomId);
         
         // Confirm room join
         socket.emit('room_joined', {
@@ -119,11 +126,9 @@ export function initWebSocket(httpServer) {
       logger.debug({ clientId, roomId }, 'Client requested state');
       socket.emit('state_sync', syncController.getState(roomId));
       
-      // Also send playlist state for the room
+      // Same signal as a mutation broadcast, so reconnecting clients take one code path
       const room = roomStateManager.getRoom(roomId);
-      const playlistResult = collectionQueries.getCollectionTracks(room.playlistCollectionId, 1000, 0);
-      const playlist = playlistResult.tracks || [];
-      socket.emit('playlist_update', playlist);
+      sendPlaylistSignal(socket, room.playlistCollectionId, roomId);
     });
 
     // Handle position reports from clients

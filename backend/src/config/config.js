@@ -2,8 +2,9 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
-// Load environment variables
-dotenv.config();
+// Load environment variables. `quiet` because dotenv 17 prints a "injected env" banner to stdout,
+// which would corrupt machine-readable output (`v2convert --json | jq`) and clutter the server log.
+dotenv.config({ quiet: true });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -45,6 +46,23 @@ const config = {
   youtubeSearchLimit: parseInt(process.env.YOUTUBE_SEARCH_LIMIT || '10', 10),
   youtubeSearchTimeout: parseInt(process.env.YOUTUBE_SEARCH_TIMEOUT || '30000', 10), // 30 seconds
   
+  // V2 player: progressive files are normalised in place to fragmented MP4 for MSE
+  ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+  ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
+  // Milliseconds here; the mp4 muxer is handed microseconds.
+  fragmentDurationMs: parseInt(process.env.FRAGMENT_DURATION_MS || '30000', 10),
+  normalizeTimeoutMs: parseInt(process.env.NORMALIZE_TIMEOUT_MS || '120000', 10),
+  // There is no NORMALIZE_ON_STARTUP: starting a container is not consent to rewrite a library.
+  // Imports convert through the download queue, a played track converts through the manifest route,
+  // and `npm run v2convert` converts the library when someone asks for it.
+  // Re-encoding is never automatic (see normalizeTrack). These are the defaults for whoever asks —
+  // `npm run v2convert -- --transcode`. Encoding is far slower than a remux: an hour of audio is
+  // minutes of CPU, so the timeout is generous.
+  transcodeFormats: (process.env.TRANSCODE_FORMATS || 'mp3')
+    .split(',').map((name) => name.trim().toLowerCase()).filter(Boolean),
+  transcodeBitrate: process.env.TRANSCODE_BITRATE || '192k',
+  transcodeTimeoutMs: parseInt(process.env.TRANSCODE_TIMEOUT_MS || '900000', 10),
+
   // External Links
   addMusicUrl: process.env.ADD_MUSIC_URL || '',
   addMusicText: process.env.ADD_MUSIC_TEXT || 'Click "Continue" to open the music source in a new tab.',

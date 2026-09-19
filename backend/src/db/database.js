@@ -27,6 +27,7 @@ async function runMigrations() {
   const hasYoutubeUrl = tableInfo.some(col => col.name === 'youtube_url');
   const hasYoutubeVideoId = tableInfo.some(col => col.name === 'youtube_video_id');
   const hasYoutubeThumbnail = tableInfo.some(col => col.name === 'youtube_thumbnail');
+  const hasMseMeta = tableInfo.some(col => col.name === 'mse_meta');
   
   if (!hasYoutubeUrl) {
     logger.info('Adding youtube_url column to tracks table');
@@ -42,6 +43,13 @@ async function runMigrations() {
   if (!hasYoutubeThumbnail) {
     logger.info('Adding youtube_thumbnail column to tracks table');
     db.exec('ALTER TABLE tracks ADD COLUMN youtube_thumbnail TEXT');
+  }
+
+  if (!hasMseMeta) {
+    // Fragment index for the V2 (MediaSource) player: fingerprint, media type and byte
+    // ranges of each fragment. Kept per track so startup only re-scans changed files.
+    logger.info('Adding mse_meta column to tracks table');
+    db.exec('ALTER TABLE tracks ADD COLUMN mse_meta TEXT');
   }
   
   // Check if download_jobs table exists
@@ -272,6 +280,17 @@ export const trackQueries = {
    */
   count: () => {
     const stmt = getDb().prepare('SELECT COUNT(*) as count FROM tracks');
+    return stmt.get().count;
+  },
+
+  /**
+   * Tracks the V2 player cannot stream yet. `mse_meta` is written by the converter — in place, or
+   * on first play — so anything above zero means part of the library still falls back to V1 until
+   * `npm run v2convert` or a listener gets to it. Stale-but-present metadata is not counted: this
+   * is a pointer at startup, not an audit.
+   */
+  countWithoutPlayMeta: () => {
+    const stmt = getDb().prepare('SELECT COUNT(*) as count FROM tracks WHERE mse_meta IS NULL');
     return stmt.get().count;
   },
 

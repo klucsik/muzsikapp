@@ -233,7 +233,7 @@ export async function downloadAudio(videoIdOrUrl, outputDir, onProgress = null) 
     
     const args = [
       '--extract-audio',
-      '--audio-format', 'mp3',
+      '--audio-format', 'm4a',
       '--audio-quality', '0', // Best quality
       '--add-metadata',
       '--embed-thumbnail',
@@ -271,7 +271,7 @@ export async function downloadAudio(videoIdOrUrl, outputDir, onProgress = null) 
         onProgress(percent, etaSeconds);
       }
       
-      // Parse destination line: [download] Destination: /path/to/file.mp3
+      // Parse destination line: [download] Destination: /path/to/file.m4a
       const destMatch = output.match(/\[download\] Destination: (.+)/);
       if (destMatch) {
         downloadedFile = destMatch[1].trim();
@@ -299,13 +299,13 @@ export async function downloadAudio(videoIdOrUrl, outputDir, onProgress = null) 
       // If we didn't detect the file from stdout, try to find it
       if (!downloadedFile) {
         try {
-          // The file should match the pattern yt-*-timestamp.mp3
+          // The file should match the pattern yt-*-timestamp.m4a
           const { readdir } = await import('fs/promises');
           const files = await readdir(outputDir);
           const matchingFile = files.find(f => 
             f.startsWith('yt-') && 
             f.includes(`-${timestamp}`) && 
-            f.endsWith('.mp3')
+            f.endsWith('.m4a')
           );
           
           if (matchingFile) {
@@ -369,9 +369,12 @@ export async function downloadAudio(videoIdOrUrl, outputDir, onProgress = null) 
  * @param {number} limit - Maximum number of results
  * @returns {Promise<Array>} - Array of search results
  */
-export async function searchYouTube(query, limit = 10) {
+export async function searchYouTube(query, limit = 10, offset = 0) {
   return new Promise((resolve, reject) => {
-    const searchQuery = `ytsearch${limit}:${query}`;
+    // yt-dlp's ytsearch only takes a count from the top of the result set, so paging fetches
+    // limit+offset entries and discards the ones already shown. YouTube keeps the ordering stable
+    // for a query within a session, which is what makes the pages line up without overlap.
+    const searchQuery = `ytsearch${limit + offset}:${query}`;
     const args = [
       searchQuery,
       '--dump-json',
@@ -379,7 +382,7 @@ export async function searchYouTube(query, limit = 10) {
       '--no-warnings',
     ];
     
-    logger.debug({ query, limit }, 'Searching YouTube with yt-dlp');
+    logger.debug({ query, limit, offset }, 'Searching YouTube with yt-dlp');
     
     const ytdlp = spawn(config.ytdlpPath, args);
     let stdout = '';
@@ -422,9 +425,10 @@ export async function searchYouTube(query, limit = 10) {
               return null;
             }
           })
-          .filter(result => result !== null);
+          .filter(result => result !== null)
+          .slice(offset, offset + limit);
         
-        logger.info({ query, resultCount: results.length }, 'YouTube search completed');
+        logger.info({ query, resultCount: results.length, offset }, 'YouTube search completed');
         resolve(results);
       } catch (error) {
         logger.error({ error, stdout }, 'Failed to parse search results');

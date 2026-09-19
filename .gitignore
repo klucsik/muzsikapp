@@ -1,0 +1,14 @@
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+*.log
+.env
+dist/
+build/
+coverage/
+tmp/
+test-*.js
+
+# Playwright artefacts
+test-results/
+playwright-report/

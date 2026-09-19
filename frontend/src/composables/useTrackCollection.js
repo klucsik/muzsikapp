@@ -3,7 +3,7 @@
  * Provides reactive state and methods for collection operations
  */
 
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import api from '../services/api';
 import websocket from '../services/websocket';
 
@@ -14,7 +14,10 @@ export function useTrackCollection(collectionId, options = {}) {
     webSocketEvents = [],
     orderBy = ref('title'),
     orderDir = ref('asc'),
-    searchQuery = ref('')
+    searchQuery = ref(''),
+    // Rows render a handful of columns; the server's full track row carries per-fragment
+    // playback metadata nobody in a list reads. Opt out where the extra fields are needed.
+    listFields = true
   } = options;
 
   // State
@@ -22,6 +25,12 @@ export function useTrackCollection(collectionId, options = {}) {
   const tracks = ref([]);
   const loading = ref(false);
   const error = ref(null);
+
+  // In-flight load guard. Selection changes and WebSocket refreshes can overlap; without
+  // this a slow response for the previously selected collection lands last and overwrites
+  // the one the user is actually looking at.
+  let loadSequence = 0;
+  let inflightLoad = null;
 
   /**
    * Get the actual collection ID value (handles computed refs)
@@ -45,12 +54,18 @@ export function useTrackCollection(collectionId, options = {}) {
       return;
     }
 
+    const sequence = ++loadSequence;
+    inflightLoad?.abort();
+    const controller = new AbortController();
+    inflightLoad = controller;
+
     loading.value = true;
     error.value = null;
 
     try {
       // Build query params for ordering (library only) and search
       const params = new URLSearchParams();
+      if (listFields) params.append('fields', 'list');
       if (orderBy.value) params.append('order_by', orderBy.value);
       if (orderDir.value) params.append('order_dir', orderDir.value);
       if (searchQuery.value) params.append('search', searchQuery.value);
@@ -58,15 +73,18 @@ export function useTrackCollection(collectionId, options = {}) {
       const queryString = params.toString();
       const url = `/api/collections/${actualId}${queryString ? `?${queryString}` : ''}`;
       
-      const data = await api.request(url);
+      const data = await api.request(url, { signal: controller.signal });
+      if (sequence !== loadSequence) return; // superseded by a newer load
       collection.value = data;
       tracks.value = data.tracks || [];
     } catch (err) {
+      if (err?.name === 'AbortError' || sequence !== loadSequence) return;
       console.error('Failed to load collection:', err);
       error.value = err.message || 'Failed to load collection';
       tracks.value = [];
     } finally {
-      loading.value = false;
+      if (inflightLoad === controller) inflightLoad = null;
+      if (sequence === loadSequence) loading.value = false;
     }
   };
 
@@ -235,6 +253,20 @@ export function useTrackCollection(collectionId, options = {}) {
   // Auto-load on mount
   if (autoLoad) {
     onMounted(() => {
+      loadCollection();
+    });
+  }
+
+  // Switching selection must not leave the previous collection's rows on screen while the
+  // new one loads; the id is reactive here only when the caller passes a ref or computed.
+  if (collectionId && typeof collectionId === 'object' && 'value' in collectionId) {
+    watch(collectionId, (next, prev) => {
+      if (next === prev) return;
+      loadSequence++; // discard any response for the collection we just left
+      inflightLoad?.abort();
+      collection.value = null;
+      tracks.value = [];
+      error.value = null;
       loadCollection();
     });
   }

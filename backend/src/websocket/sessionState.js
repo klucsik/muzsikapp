@@ -22,6 +22,16 @@ export class SessionState {
    * Start playing a track
    */
   playTrack(track, startPosition = 0, playlistIndex = null) {
+    // A loop region is a slice of one track, so it cannot follow playback onto the next one —
+    // clients clear their markers on `play_track` and would then ignore a region the server
+    // still wraps positions inside. Repeating the *same* track keeps it, which is what makes
+    // “repeat this section” survive the replay the server performs on `track_ended`.
+    const previousId = this.currentTrack?.id ?? null;
+    if ((!track || previousId !== track.id) && (this.loopStart !== null || this.loopEnd !== null)) {
+      this.loopStart = null;
+      this.loopEnd = null;
+    }
+
     this.currentTrack = track;
     this.currentTrackPlaylistIndex = playlistIndex;
     this.playbackState = 'playing';
@@ -132,6 +142,22 @@ export class SessionState {
    * Set custom loop points
    */
   setLoopPoints(loopStart, loopEnd) {
+    if (
+      !Number.isFinite(loopStart) || !Number.isFinite(loopEnd)
+      || loopStart < 0 || loopEnd <= loopStart
+    ) {
+      return this.getState();
+    }
+
+    // A region that starts past the end of the loaded track can never be reached, so “repeat
+    // this section” would silently degrade into “repeat the whole track”. Clamping also stops a
+    // region from the previous (longer) track outrunning the short one now loaded.
+    const duration = Number(this.currentTrack?.duration);
+    if (Number.isFinite(duration) && duration > 0) {
+      loopEnd = Math.min(loopEnd, duration);
+      loopStart = Math.min(loopStart, Math.max(0, loopEnd - 0.5));
+    }
+
     this.loopStart = loopStart;
     this.loopEnd = loopEnd;
     return this.getState();
@@ -159,7 +185,7 @@ export class SessionState {
         const loopStart = this.loopStart !== null ? this.loopStart : 0;
         const loopDuration = this.loopEnd - loopStart;
         
-        if (position >= this.loopEnd) {
+        if (loopDuration > 0 && position >= this.loopEnd) {
           // Calculate how many times we've looped and where we should be
           const overrun = position - this.loopEnd;
           const loops = Math.floor(overrun / loopDuration);
