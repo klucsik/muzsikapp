@@ -284,6 +284,17 @@ export const trackQueries = {
   },
 
   /**
+   * Tracks the V2 player cannot stream yet. `mse_meta` is written by the converter — in place, or
+   * on first play — so anything above zero means part of the library still falls back to V1 until
+   * `npm run v2convert` or a listener gets to it. Stale-but-present metadata is not counted: this
+   * is a pointer at startup, not an audit.
+   */
+  countWithoutPlayMeta: () => {
+    const stmt = getDb().prepare('SELECT COUNT(*) as count FROM tracks WHERE mse_meta IS NULL');
+    return stmt.get().count;
+  },
+
+  /**
    * Delete track by ID
    */
   delete: (id) => {

@@ -43,9 +43,11 @@ Or you can use the provided `./start.sh` script to start both frontend and backe
 
 ## Preparing the library for the V2 player
 
-The V2 player streams fragmented MP4. The backend converts tracks in place on startup, but this
-runs the same pass by hand — before a first deploy, or to find out why one song still plays through
-V1 (a track with no stored metadata answers its manifest with 415 and the UI falls back silently):
+The V2 player streams fragmented MP4, which most libraries are not. Nothing converts on startup —
+booting a container is not consent to rewrite files — so tracks are converted by the download queue
+as they arrive, by the manifest route when someone plays one, and across the whole library by this
+command: before a first deploy, or to find out why a song still plays through V1 (a track with no
+stored metadata answers its manifest with 415 and the UI falls back silently).
 
 ```bash
 npm run v2convert -- --dry-run          # what would change, nothing written
@@ -55,8 +57,12 @@ npm run v2convert -- --json             # one summary line for scripts; exit 1 o
 ```
 
 It needs `ffmpeg` and `ffprobe` on `PATH` (or `FFMPEG_PATH` / `FFPROBE_PATH`), and is safe to run
-while the server is up. Set `NORMALIZE_ON_STARTUP=false` to skip the boot-time pass; the log then
-points back at this command.
+while the server is up. Startup reports how many tracks still have no V2 metadata and points here:
+
+```
+1022 of 1027 track(s) have no V2 playback metadata — they play on V1 until `npm run v2convert`,
+or their own first play, converts them
+```
 
 ### Re-encoding: `--transcode`
 
@@ -77,8 +83,9 @@ probed and length-checked before the row is moved, and a name already in use get
 rather than being overwritten. Encoding is roughly 35× slower than a remux — about 5 s per 3-minute
 track, so plan an hour of CPU for a thousand tracks and keep `--concurrency` near your core count.
 
-This **never runs at startup**, whatever `NORMALIZE_ON_STARTUP` says: a deploy must not spend an
-hour re-encoding a library by accident. Defaults live in `TRANSCODE_FORMATS` (default `mp3`),
+This **never runs by itself** — not at startup, not on download, not when a manifest is asked for:
+a re-encode must be typed, because a deploy that silently spent an hour transcribing somebody's
+collection would be indefensible. Defaults live in `TRANSCODE_FORMATS` (default `mp3`),
 `TRANSCODE_BITRATE` (default `192k`) and `TRANSCODE_TIMEOUT_MS` (default 15 min per track).
 
 ## Project Structure

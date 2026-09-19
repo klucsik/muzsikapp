@@ -2,10 +2,12 @@
 /**
  * v2convert — get the library into the shape the V2 player needs, on purpose and in the foreground.
  *
- * The server runs this same pass at startup (`NORMALIZE_ON_STARTUP`, on by default) in the
- * background, which is right for a deploy and terrible for finding out *why* V2 is not engaging:
- * a missing ffmpeg, or a library that is all MP3, just looks like "V2 never started", because a
- * track without `mse_meta` answers its manifest with 415 and the UI falls back to V1 silently.
+ * The server deliberately converts nothing at startup — a container boot is not consent to rewrite
+ * files — so this is the whole-library path: imports convert through the download queue, a track
+ * someone plays converts through the manifest route, and this converts what nobody has played yet.
+ * It is also how you find out why V2 is not engaging: a missing ffmpeg, or a library that is all
+ * MP3, just looks like "V2 never started", because a track without `mse_meta` answers its manifest
+ * with 415 and the UI falls back to V1 silently.
  *
  *   npm run v2convert -- --dry-run             what would change, nothing written
  *   npm run v2convert                          convert in place

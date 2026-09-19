@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import config from './config/config.js';
 import logger from './utils/logger.js';
-import { initDatabase, closeDatabase } from './db/database.js';
+import { initDatabase, closeDatabase, trackQueries } from './db/database.js';
 import { authOptional } from './middleware/auth.js';
 import authRoutes from './routes/auth.js';
 import systemRoutes from './routes/system.js';
@@ -19,7 +19,6 @@ import downloadsRoutes from './routes/downloads.js';
 import { scanMusicLibrary } from './scanner/fileScanner.js';
 import { initWebSocket, closeWebSocket, getClientCount } from './websocket/socketServer.js';
 import downloadQueue from './services/downloadQueue.js';
-import { normalizeLibrary } from './services/formatNormalizer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -181,19 +180,15 @@ async function start() {
     // File watcher disabled - library updates happen on startup scan and through download queue
     logger.info('File watcher disabled - library synced on startup and through downloads');
 
-    // Prepare tracks for the V2 player (fragmented MP4). The first run rewrites every
-    // progressive file, so it must never delay the API coming up.
-    if (config.normalizeOnStartup) {
-      setImmediate(() => {
-        normalizeLibrary()
-          .then((summary) => logger.info(summary, 'Fragment normalisation finished'))
-          .catch((error) => logger.error({ error }, 'Fragment normalisation failed'));
-      });
-    } else {
-      // Nobody wants the library rewritten unattended at boot. Say how to do it on purpose, or the
-      // only symptom of an unprepared track is the UI quietly falling back to V1.
-      logger.info('Fragment normalisation skipped (NORMALIZE_ON_STARTUP=false): '
-        + 'run `npm run v2convert -- --dry-run` to see what the V2 player still needs');
+    // Preparing tracks for the V2 player is not a startup job. Conversion rewrites library files,
+    // and booting a container is not consent to do that. Each import is converted by the download
+    // queue, each track someone actually plays is converted by the manifest route, and the whole
+    // library is converted on purpose with `npm run v2convert`. Startup keeps the pointer, because
+    // the only symptom of an unprepared track used to be the UI quietly playing it on V1.
+    const unprepared = trackQueries.countWithoutPlayMeta();
+    if (unprepared > 0) {
+      logger.info(`${unprepared} of ${trackQueries.count()} track(s) have no V2 playback metadata — `
+        + 'they play on V1 until `npm run v2convert`, or their own first play, converts them');
     }
   } catch (error) {
     logger.error({ error }, 'Failed to start server');

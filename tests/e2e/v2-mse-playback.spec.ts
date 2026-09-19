@@ -285,7 +285,6 @@ test.describe('V2 fragmented-MP4 playback', () => {
         MUSIC_DIR: musicDir,
         DATABASE_PATH: join(tempDir, 'e2e.db'),
         SCAN_ON_STARTUP: 'true',
-        NORMALIZE_ON_STARTUP: 'true',
         // Playback control (POST /api/playback/play) requires an authenticated client.
         AUTH_PASSWORD: PASSWORD,
         LOG_LEVEL: 'warn',

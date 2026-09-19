@@ -376,3 +376,16 @@ describe('getPlayMeta / buildManifest', () => {
     expect(readdirSync(musicDir).filter((name) => name.includes('.frag-'))).toEqual([]);
   });
 });
+
+describe('the startup pointer', () => {
+  it('counts the tracks the V2 player cannot stream yet', () => {
+    const before = trackQueries.countWithoutPlayMeta();
+
+    const track = freshTrack('pointer.m4a');
+    expect(trackQueries.countWithoutPlayMeta()).toBe(before + 1);
+
+    // Converting — in place or on first play — is what takes the number down again.
+    trackQueries.update(track.id, { mse_meta: '{"version":2,"fragments":[]}' });
+    expect(trackQueries.countWithoutPlayMeta()).toBe(before);
+  });
+});

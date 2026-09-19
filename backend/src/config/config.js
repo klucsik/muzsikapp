@@ -52,8 +52,9 @@ const config = {
   // Milliseconds here; the mp4 muxer is handed microseconds.
   fragmentDurationMs: parseInt(process.env.FRAGMENT_DURATION_MS || '30000', 10),
   normalizeTimeoutMs: parseInt(process.env.NORMALIZE_TIMEOUT_MS || '120000', 10),
-  // Rewrites library files on startup scan; set false to index without touching disk
-  normalizeOnStartup: process.env.NORMALIZE_ON_STARTUP !== 'false',
+  // There is no NORMALIZE_ON_STARTUP: starting a container is not consent to rewrite a library.
+  // Imports convert through the download queue, a played track converts through the manifest route,
+  // and `npm run v2convert` converts the library when someone asks for it.
   // Re-encoding is never automatic (see normalizeTrack). These are the defaults for whoever asks —
   // `npm run v2convert -- --transcode`. Encoding is far slower than a remux: an hour of audio is
   // minutes of CPU, so the timeout is generous.
