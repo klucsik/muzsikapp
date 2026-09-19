@@ -15,6 +15,7 @@ import scannerRoutes from './routes/scanner.js';
 import playbackRoutes from './routes/playback.js';
 import folderRoutes from './routes/folders.js';
 import collectionsRoutes from './routes/collections.js';
+import { flushPlaylistUpdates } from './routes/collections.js';
 import downloadsRoutes from './routes/downloads.js';
 import { scanMusicLibrary } from './scanner/fileScanner.js';
 import { initWebSocket, closeWebSocket, getClientCount } from './websocket/socketServer.js';
@@ -201,7 +202,10 @@ async function start() {
  */
 async function shutdown() {
   logger.info('Shutting down gracefully...');
-  
+
+  // Push any coalesced playlist update before the sockets go away
+  flushPlaylistUpdates();
+
   // Close WebSocket server
   closeWebSocket();
   
