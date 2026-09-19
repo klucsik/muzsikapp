@@ -189,6 +189,11 @@ async function start() {
           .then((summary) => logger.info(summary, 'Fragment normalisation finished'))
           .catch((error) => logger.error({ error }, 'Fragment normalisation failed'));
       });
+    } else {
+      // Nobody wants the library rewritten unattended at boot. Say how to do it on purpose, or the
+      // only symptom of an unprepared track is the UI quietly falling back to V1.
+      logger.info('Fragment normalisation skipped (NORMALIZE_ON_STARTUP=false): '
+        + 'run `npm run v2convert -- --dry-run` to see what the V2 player still needs');
     }
   } catch (error) {
     logger.error({ error }, 'Failed to start server');

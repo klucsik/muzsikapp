@@ -197,8 +197,17 @@ async function runNormalization(track, { apply = true, fragmentDurationMs = conf
 
   if (fragmented && !overFragmented) {
     const meta = metaFromScan(scan, codec, fingerprintOf(before));
+    // The file is in shape but the row may not be: a rebuilt database, a file copied in by hand,
+    // or a META_VERSION bump. `getPlayMeta` repairs that lazily on the first manifest request, so
+    // it is not an error — but a tool that writes rows has to say it wrote them, otherwise a run
+    // that changed the database reports "nothing to do".
+    if (metaIsCurrent(track, meta)) return { status: 'fragmented', meta };
     if (apply) await persist(track, meta);
-    return { status: 'fragmented', meta };
+    return {
+      status: 'metadata',
+      meta,
+      reason: track.mse_meta ? 'stored metadata out of date' : 'no stored metadata',
+    };
   }
 
   if (!apply) {
@@ -280,6 +289,23 @@ async function runNormalization(track, { apply = true, fragmentDurationMs = conf
   }
 }
 
+/**
+ * Does the row already hold exactly the metadata this scan produced? The fingerprint is
+ * size+mtime, so a replaced or re-downloaded file fails it, and a META_VERSION bump refreshes
+ * every row once instead of leaving stale byte ranges in the manifest.
+ */
+function metaIsCurrent(track, meta) {
+  if (!track?.mse_meta) return false;
+  try {
+    const stored = JSON.parse(track.mse_meta);
+    return stored.version === META_VERSION
+      && stored.fingerprint === meta.fingerprint
+      && stored.fragmentCount === meta.fragmentCount;
+  } catch {
+    return false; // unreadable json — rewrite it
+  }
+}
+
 async function persist(track, meta) {
   if (!track?.id) return;
   const { trackQueries } = await import('../db/database.js');
@@ -332,40 +358,57 @@ export function buildManifest(track, meta) {
  * Normalise the whole library (startup path). Concurrency stays low: each conversion is a
  * full file rewrite, and the point is to not block playback while it runs.
  */
-export async function normalizeLibrary({ apply = true, limit = 100_000, concurrency = 2 } = {}) {
+export async function normalizeLibrary({ apply = true, limit = 100_000, concurrency = 2, onTrack = null, ids = null } = {}) {
   const { trackQueries } = await import('../db/database.js');
-  const tracks = trackQueries.getAll(limit, 0, 'created_at', 'asc').filter(Boolean);
-  const summary = { checked: 0, normalized: 0, fragmented: 0, wouldNormalize: 0, skipped: 0, failed: 0, reasons: {} };
+  // `ids` narrows the run to the tracks someone named (the CLI's --track); null is the whole library.
+  const tracks = ids
+    ? ids.map((id) => trackQueries.getById(id)).filter(Boolean)
+    : trackQueries.getAll(limit, 0, 'created_at', 'asc').filter(Boolean);
+  const summary = { checked: 0, normalized: 0, metadata: 0, fragmented: 0, wouldNormalize: 0, skipped: 0, failed: 0, reasons: {} };
   const blame = (reason) => {
     const key = String(reason || 'unknown reason').slice(0, 160);
     summary.reasons[key] = (summary.reasons[key] || 0) + 1;
   };
   const queue = [...tracks];
 
+  const report = (track, result, index, ms) => {
+    if (!onTrack) return;
+    try {
+      onTrack({ track, result, index, total: tracks.length, ms });
+    } catch {
+      // A progress printer must never abort a conversion.
+    }
+  };
+
   async function worker() {
     while (queue.length > 0) {
+      // Position in the queue, not `checked`: with two workers that counter races.
+      const index = tracks.length - queue.length;
       const track = queue.shift();
       if (!track) continue;
       summary.checked += 1;
+      const startedAt = Date.now();
+      let result;
       try {
-        const result = await normalizeTrack(track, { apply });
-        if (result.status === 'normalized') summary.normalized += 1;
-        else if (result.status === 'fragmented') summary.fragmented += 1;
-        else if (result.status === 'would-normalize') summary.wouldNormalize += 1;
-        else if (result.status === 'skipped' || result.status === 'missing') {
-          summary.skipped += 1;
-          blame(result.reason || 'file missing');
-        } else {
-          summary.failed += 1;
-          blame(result.reason);
-          logger.warn({ trackId: track.id, reason: result.reason }, 'Normalisation skipped/failed');
-        }
+        result = await normalizeTrack(track, { apply });
       } catch (error) {
-        summary.failed += 1;
-        blame(error.message);
         logger.error({ trackId: track.id, error: error.message }, 'Normalisation threw');
-        logger.error({ trackId: track.id, error: error.message }, 'Normalisation threw');
+        result = { status: 'failed', reason: error.message };
       }
+
+      if (result.status === 'normalized') summary.normalized += 1;
+      else if (result.status === 'metadata') summary.metadata += 1;
+      else if (result.status === 'fragmented') summary.fragmented += 1;
+      else if (result.status === 'would-normalize') summary.wouldNormalize += 1;
+      else if (result.status === 'skipped' || result.status === 'missing') {
+        summary.skipped += 1;
+        blame(result.reason || 'file missing');
+      } else {
+        summary.failed += 1;
+        blame(result.reason);
+        logger.warn({ trackId: track.id, reason: result.reason }, 'Normalisation skipped/failed');
+      }
+      report(track, result, index, Date.now() - startedAt);
     }
   }
 

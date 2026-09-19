@@ -2,8 +2,9 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
-// Load environment variables
-dotenv.config();
+// Load environment variables. `quiet` because dotenv 17 prints a "injected env" banner to stdout,
+// which would corrupt machine-readable output (`v2convert --json | jq`) and clutter the server log.
+dotenv.config({ quiet: true });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

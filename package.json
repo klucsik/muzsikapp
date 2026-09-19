@@ -8,6 +8,7 @@
     "dev:frontend": "cd frontend && npm run dev",
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "build:frontend": "cd frontend && npm run build",
+    "v2convert": "cd backend && node src/scripts/v2convert.js",
     "start": "./start.sh"
   },
   "devDependencies": {

@@ -9,7 +9,7 @@
     "dev": "node --watch src/server.js",
     "db:migrate": "node src/db/migrate.js",
     "scan": "node src/scanner/scan.js",
-    "normalize": "node src/scripts/normalize.js",
+    "v2convert": "node src/scripts/v2convert.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -172,6 +172,29 @@ describe('normalizeTrack', () => {
     expect(after.mtimeMs).toBe(before.mtimeMs);
   });
 
+  it('repairs a row whose file is fragmented and whose metadata is gone', async () => {
+    const track = freshTrack();
+    await normalizeTrack(track);
+
+    // A rebuilt database, or a file copied into the library by hand: the container is already in
+    // shape and the row knows nothing about it. Rewriting the file would be waste; writing the row
+    // is real work, so it gets a status of its own instead of hiding inside "fragmented".
+    trackQueries.update(track.id, { mse_meta: null });
+    const result = await normalizeTrack(trackQueries.getById(track.id));
+
+    expect(result.status).toBe('metadata');
+    expect(result.reason).toBe('no stored metadata');
+    expect(JSON.parse(trackQueries.getById(track.id).mse_meta).fragmentCount)
+      .toBe(result.meta.fragmentCount);
+
+    // A dry run reports the same thing and still writes nothing.
+    trackQueries.update(track.id, { mse_meta: null });
+    const dry = await normalizeTrack(trackQueries.getById(track.id), { apply: false });
+
+    expect(dry.status).toBe('metadata');
+    expect(trackQueries.getById(track.id).mse_meta).toBeNull();
+  });
+
   it('leaves the original file alone when ffmpeg fails', async () => {
     const track = freshTrack();
     const before = statSync(join(musicDir, 'prog.m4a'));
