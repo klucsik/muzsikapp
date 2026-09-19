@@ -620,7 +620,7 @@ function clearTracks(db, collectionId) {
  * @param {number} offset - Offset for pagination
  * @returns {Object} Tracks and total count
  */
-function getCollectionTracks(db, collectionId, limit = 50, offset = 0) {
+function getCollectionTracks(db, collectionId, limit = 50, offset = 0, fields = 'full') {
   try {
     const collection = db.prepare(`
       SELECT * FROM track_collections WHERE id = ?
@@ -639,7 +639,7 @@ function getCollectionTracks(db, collectionId, limit = 50, offset = 0) {
       
       tracks = db.prepare(`
         SELECT 
-          t.*,
+          ${trackColumns(fields)},
           ct.position,
           ct.added_at
         FROM tracks t
@@ -657,7 +657,7 @@ function getCollectionTracks(db, collectionId, limit = 50, offset = 0) {
 
       tracks = db.prepare(`
         SELECT 
-          t.*,
+          ${trackColumns(fields)},
           ct.position,
           ct.added_at
         FROM collection_tracks ct

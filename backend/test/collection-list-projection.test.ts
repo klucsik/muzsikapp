@@ -83,4 +83,18 @@ describe('collection list projection', () => {
     expect(lib.tracks[0].mse_meta).toBeUndefined();
     expect(lib.tracks[0].title).toBeTruthy();
   });
+
+  it('projects the paginated variant too, and is not capped at 1000', () => {
+    // The WebSocket join path used to call this with a hard limit of 1000, silently truncating
+    // playlists longer than that while HTTP returned everything.
+    const page = cq.getCollectionTracks(db, 'f1', 5000, 0, 'list');
+    expect(page.total).toBe(5);
+    expect(page.tracks).toHaveLength(5);
+    expect(page.tracks[0].mse_meta).toBeUndefined();
+    expect(page.tracks[0].filepath).toBeUndefined();
+    expect(page.tracks.map((t) => t.position)).toEqual([0, 1, 2, 3, 4]);
+
+    const full = cq.getCollectionTracks(db, 'f1', 5000, 0);
+    expect(full.tracks[0].mse_meta).toBeTruthy();
+  });
 });
