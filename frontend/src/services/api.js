@@ -285,8 +285,8 @@ class ApiClient {
   }
 
   // YouTube Downloads
-  async searchYouTube(query, limit = 10) {
-    const params = new URLSearchParams({ q: query, limit: limit.toString() });
+  async searchYouTube(query, limit = 10, offset = 0) {
+    const params = new URLSearchParams({ q: query, limit: limit.toString(), offset: offset.toString() });
     return this.request(`/api/downloads/search?${params}`);
   }
 

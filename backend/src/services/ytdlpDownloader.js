@@ -369,9 +369,12 @@ export async function downloadAudio(videoIdOrUrl, outputDir, onProgress = null) 
  * @param {number} limit - Maximum number of results
  * @returns {Promise<Array>} - Array of search results
  */
-export async function searchYouTube(query, limit = 10) {
+export async function searchYouTube(query, limit = 10, offset = 0) {
   return new Promise((resolve, reject) => {
-    const searchQuery = `ytsearch${limit}:${query}`;
+    // yt-dlp's ytsearch only takes a count from the top of the result set, so paging fetches
+    // limit+offset entries and discards the ones already shown. YouTube keeps the ordering stable
+    // for a query within a session, which is what makes the pages line up without overlap.
+    const searchQuery = `ytsearch${limit + offset}:${query}`;
     const args = [
       searchQuery,
       '--dump-json',
@@ -379,7 +382,7 @@ export async function searchYouTube(query, limit = 10) {
       '--no-warnings',
     ];
     
-    logger.debug({ query, limit }, 'Searching YouTube with yt-dlp');
+    logger.debug({ query, limit, offset }, 'Searching YouTube with yt-dlp');
     
     const ytdlp = spawn(config.ytdlpPath, args);
     let stdout = '';
@@ -422,9 +425,10 @@ export async function searchYouTube(query, limit = 10) {
               return null;
             }
           })
-          .filter(result => result !== null);
+          .filter(result => result !== null)
+          .slice(offset, offset + limit);
         
-        logger.info({ query, resultCount: results.length }, 'YouTube search completed');
+        logger.info({ query, resultCount: results.length, offset }, 'YouTube search completed');
         resolve(results);
       } catch (error) {
         logger.error({ error, stdout }, 'Failed to parse search results');

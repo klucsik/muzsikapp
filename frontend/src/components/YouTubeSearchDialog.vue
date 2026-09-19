@@ -119,6 +119,17 @@
               </div>
             </div>
           </div>
+
+          <!-- Next page: stays clickable until YouTube runs out, disabled while in flight -->
+          <button
+            v-if="hasMoreResults"
+            class="load-more-btn"
+            :disabled="loadingMore || searching"
+            @click="loadMoreResults"
+          >
+            <span v-if="loadingMore" class="loading-spinner"></span>
+            {{ loadingMore ? 'Loading…' : `Load 10 more (${results.length} shown)` }}
+          </button>
         </div>
 
         <!-- Empty State -->
@@ -263,6 +274,11 @@ const searchQuery = ref('');
 const lastSearchQuery = ref('');
 const results = ref([]);
 const searching = ref(false);
+// Paging state for "load more": the query stays put and each page appends to `results`.
+const loadingMore = ref(false);
+const hasMoreResults = ref(false);
+const resultOffset = ref(0);
+const SEARCH_PAGE_SIZE = 10;
 const error = ref(null);
 const successMessage = ref(null);
 const hasSearched = ref(false);
@@ -597,11 +613,15 @@ const handleYouTubeSearch = async (query) => {
   searching.value = true;
   error.value = null;
   results.value = [];
+  resultOffset.value = 0;
+  hasMoreResults.value = false;
   lastSearchQuery.value = query;
 
   try {
-    const response = await api.searchYouTube(query, 10);
+    const response = await api.searchYouTube(query, SEARCH_PAGE_SIZE, 0);
     results.value = response.results || [];
+    resultOffset.value = results.value.length;
+    hasMoreResults.value = !!response.has_more;
     hasSearched.value = true;
     
     if (results.value.length === 0) {
@@ -612,6 +632,33 @@ const handleYouTubeSearch = async (query) => {
     error.value = 'Search failed. Please try again.';
   } finally {
     searching.value = false;
+  }
+};
+
+/**
+ * Fetch the next page of results for the last query and append it.
+ */
+const loadMoreResults = async () => {
+  if (loadingMore.value || searching.value || !hasMoreResults.value) return;
+
+  loadingMore.value = true;
+  error.value = null;
+  try {
+    const response = await api.searchYouTube(lastSearchQuery.value, SEARCH_PAGE_SIZE, resultOffset.value);
+    const page = response.results || [];
+
+    // The backend pages by slicing a longer ytsearch, so a repeated row is possible when
+    // YouTube reshuffles between calls.
+    const seen = new Set(results.value.map((r) => r.video_id));
+    const fresh = page.filter((r) => !seen.has(r.video_id));
+    results.value = [...results.value, ...fresh];
+    resultOffset.value += page.length;
+    hasMoreResults.value = !!response.has_more && page.length > 0;
+  } catch (err) {
+    console.error('Load more failed:', err);
+    error.value = 'Could not load more results. Please try again.';
+  } finally {
+    loadingMore.value = false;
   }
 };
 
@@ -707,6 +754,9 @@ watch(() => props.show, async (newVal) => {
     // Reset state when closing
     searchQuery.value = '';
     results.value = [];
+    resultOffset.value = 0;
+    hasMoreResults.value = false;
+    loadingMore.value = false;
     error.value = null;
     successMessage.value = null;
     hasSearched.value = false;
@@ -934,6 +984,42 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.load-more-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px 16px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #eee;
+  font-size: 0.9em;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.load-more-btn:hover:not(:disabled) {
+  background: #333;
+  border-color: #42b983;
+}
+
+.load-more-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.loading-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #555;
+  border-top-color: #42b983;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
 }
 
 .result-item {
