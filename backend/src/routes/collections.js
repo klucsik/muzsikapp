@@ -27,11 +27,11 @@ const emitPlaylistUpdate = (collectionId) => {
         if (roomMatch) {
           const roomId = `room-${roomMatch[1]}`;
           io.to(roomId).emit('playlist_update', { collectionId, roomId });
-          logger.info({ event: 'playlist_update', roomId, collectionId }, '📢 Broadcasting playlist update to room');
+          logger.debug({ event: 'playlist_update', roomId, collectionId }, 'Broadcasting playlist update to room');
         } else {
           // Legacy 'current-playlist' - broadcast to all
           io.emit('playlist_update', { collectionId });
-          logger.info({ event: 'playlist_update', collectionId }, '📢 Broadcasting playlist update to all clients');
+          logger.debug({ event: 'playlist_update', collectionId }, 'Broadcasting playlist update to all clients');
         }
       }
     } catch (err) {
