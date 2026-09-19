@@ -157,6 +157,7 @@ const props = defineProps({
   cacheMode:       { type: String,  default: 'soft' },
   usedMemory:      { type: Number, default: 0 },
   totalMemory:     { type: Number, default: 50 * 1024 * 1024 },
+  speedCapBytes:   { type: Number, default: 0 },
   speedHistory:    { type: Array,  default: () => [] },
   stallCount:      { type: Number, default: 0 },
   totalStallDuration: { type: Number, default: 0 },
@@ -201,8 +202,27 @@ function onCacheModeChange(mode) {
 
 // ── Speed Cap Selector ───────────────────────────────────────────
 
-const speedCapLabel = ref('none');
-const customSpeedKbs = ref(512);
+const SPEED_CAP_PRESETS = [5242880, 2097152, 1048576];
+
+function labelForSpeedCap(bytes) {
+  const cap = normalizeSpeedCapBytes(bytes);
+  if (!cap) return 'none';
+  if (SPEED_CAP_PRESETS.includes(cap)) return String(cap);
+  return 'custom';
+}
+
+function normalizeSpeedCapBytes(value) {
+  const bytes = Number.parseInt(value, 10);
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+}
+
+const speedCapLabel = ref(labelForSpeedCap(props.speedCapBytes));
+const customSpeedKbs = ref(Math.max(64, Math.round((props.speedCapBytes || 512 * 1024) / 1024)));
+
+watch(() => props.speedCapBytes, (bytes) => {
+  speedCapLabel.value = labelForSpeedCap(bytes);
+  if (bytes) customSpeedKbs.value = Math.max(64, Math.round(bytes / 1024));
+});
 
 function onSpeedCapChange(e) {
   const val = e.target.value;

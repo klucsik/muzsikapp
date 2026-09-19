@@ -736,6 +736,16 @@ export function useMseBuffer() {
       || _lastAppendedIndex + 1 >= fragmentCount.value;
   }
 
+  /**
+   * Background cache work can be more eager than playback prefetch. When nothing is playing there
+   * is no live listener to starve, so a paused hard-mode player should keep filling the queue
+   * instead of waiting for the decoder reserve to reach the normal lookahead threshold.
+   */
+  function backgroundFillAllowed() {
+    if (!playing.value) return !_isShuttingDown && !!currentTrackId.value && _initAppended && !_sequentialFetchInFlight;
+    return nextTrackBandwidthFree();
+  }
+
   // ── Cache aggressiveness (soft window / hard budget fill) ──────
   //
   // Playback itself is served by the sequential chain above; everything here is background
@@ -815,7 +825,7 @@ export function useMseBuffer() {
    * so a fill never competes with the fragment being heard.
    */
   async function fillCache() {
-    if (_fillInFlight || _isShuttingDown || !_initAppended) return;
+    if (_fillInFlight || !backgroundFillAllowed()) return;
     const trackAtStart = currentTrackId.value;
     if (!trackAtStart) return;
 
@@ -1044,7 +1054,7 @@ export function useMseBuffer() {
       // buying queue until the byte budget is full. Comparing against the raw lookahead alone
       // never fires on short tracks, or near the end of a long one, because the remaining audio
       // is smaller than the reserve.
-      if (nextTrackBandwidthFree()) fillCache();
+      fillCache();
 
       for (const index of wanted) {
         const key = `${currentTrackId.value}-${index}`;

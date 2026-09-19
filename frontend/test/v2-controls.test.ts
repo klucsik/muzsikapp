@@ -118,7 +118,6 @@ async function mountPlayer() {
   const { default: AudioPlayerV2 } = await import('../src/components/AudioPlayerV2.vue');
   const wrapper = mount(AudioPlayerV2, {
     props: { currentTrackId: 't1', hasNext: true, hasPrevious: true, playlist: [] },
-    global: { stubs: { SettingsPanel: true } },
   });
   await flushPromises();
   stubBarGeometry(wrapper);
@@ -393,13 +392,38 @@ describe('AudioPlayerV2 cache aggressiveness', () => {
   });
 
   it('applies the saved cache mode when the player mounts', async () => {
-    localStorage.setItem('muzsikapp-player-settings-v2', JSON.stringify({ cacheMode: 'hard' }));
+    localStorage.setItem('muzsikapp-player-settings-v2', JSON.stringify({
+      cacheMode: 'hard',
+      cacheSizeMb: 175,
+      speedCapBytes: 5 * 1024 * 1024,
+    }));
 
     await mountPlayer();
 
     // A hard-mode listener must not get soft behaviour just because they have not opened the
     // settings panel yet — the first track is already downloading by then.
     expect(mse.setCacheMode).toHaveBeenCalledWith('hard');
+    expect(mse.setCacheLimit).toHaveBeenCalledWith(175 * 1024 * 1024);
+    expect(mse.setSpeedCap).toHaveBeenCalledWith(5 * 1024 * 1024);
+  });
+
+  it('persists cache controls with the same browser-store surface as volume', async () => {
+    const wrapper = await mountPlayer();
+
+    await wrapper.find('.chevron-toggle').trigger('click');
+    await flushPromises();
+
+    await wrapper.find('#cache-size-slider').setValue(175);
+    await wrapper.find('#speed-cap-select').setValue('5242880');
+    await flushPromises();
+
+    expect(mse.setCacheLimit).toHaveBeenCalledWith(175 * 1024 * 1024);
+    expect(mse.setSpeedCap).toHaveBeenCalledWith(5 * 1024 * 1024);
+    expect(JSON.parse(localStorage.getItem('muzsikapp-player-settings-v2'))).toMatchObject({
+      cacheSizeMb: 175,
+      speedCapBytes: 5 * 1024 * 1024,
+    });
+    wrapper.unmount();
   });
 
   it('defaults to soft with nothing saved', async () => {

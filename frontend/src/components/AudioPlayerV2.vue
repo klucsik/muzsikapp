@@ -163,7 +163,8 @@
     <SettingsPanel
       :cache-mode="cacheMode"
       :used-memory="telemetryData.usedMemory"
-      :total-memory="telemetryData.totalMemory"
+      :total-memory="cacheSizeMb * 1024 * 1024"
+      :speed-cap-bytes="speedCapBytes"
       :speed-history="telemetryData.speedHistory"
       :stall-count="telemetryData.stallCount"
       :total-stall-duration="telemetryData.totalStallDuration"
@@ -218,17 +219,32 @@ const telemetryData = computed(() => ({
 // ── Settings Handlers ────────────────────────────────────────────
 
 function onUpdateCacheLimit(bytes) {
-  mse.setCacheLimit(bytes);
+  onUpdateCacheLimitAndPersist(bytes);
 }
 
 function onUpdateSpeedCap(bytesPerSec) {
-  mse.setSpeedCap(bytesPerSec);
+  onUpdateSpeedCapAndPersist(bytesPerSec);
 }
 
 // ── Persisted player settings ─────────────────────────────────
-// One JSON blob rather than a key per control, so the next setting costs a field. Cache size and
-// the download cap stay session-scoped on purpose: both are stress-test dials, and a value left
-// over from last week's experiment reads like a broken player.
+// One JSON blob rather than a key per control, so the next setting costs a field. The browser
+// store is the same surface volume already uses: reload should not put the listener back on
+// defaults they did not choose.
+
+const DEFAULT_CACHE_MB = 50;
+const CACHE_MB_MIN = 10;
+const CACHE_MB_MAX = 500;
+
+function clampCacheMb(value) {
+  const mb = Number.parseInt(value, 10);
+  if (!Number.isFinite(mb)) return DEFAULT_CACHE_MB;
+  return Math.min(CACHE_MB_MAX, Math.max(CACHE_MB_MIN, mb));
+}
+
+function normalizeSpeedCapBytes(value) {
+  const bytes = Number.parseInt(value, 10);
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+}
 
 function readPlayerSettings() {
   try {
@@ -242,13 +258,31 @@ function writePlayerSettings(patch) {
   localStorage.setItem(CACHE_SETTINGS_KEY, JSON.stringify({ ...readPlayerSettings(), ...patch }));
 }
 
-const cacheMode = ref(normalizeCacheMode(readPlayerSettings().cacheMode));
+const savedPlayerSettings = readPlayerSettings();
+const cacheMode = ref(normalizeCacheMode(savedPlayerSettings.cacheMode));
+const cacheSizeMb = ref(clampCacheMb(savedPlayerSettings.cacheSizeMb ?? DEFAULT_CACHE_MB));
+const speedCapBytes = ref(normalizeSpeedCapBytes(savedPlayerSettings.speedCapBytes));
 
 function onUpdateCacheMode(mode) {
   const next = normalizeCacheMode(mode);
   cacheMode.value = next;
   writePlayerSettings({ cacheMode: next });
   mse.setCacheMode(next);
+}
+
+function onUpdateCacheLimitAndPersist(bytes) {
+  const mb = clampCacheMb(Math.round(Number(bytes) / (1024 * 1024)));
+  const next = mb * 1024 * 1024;
+  cacheSizeMb.value = mb;
+  writePlayerSettings({ cacheSizeMb: mb });
+  mse.setCacheLimit(next);
+}
+
+function onUpdateSpeedCapAndPersist(bytes) {
+  const next = normalizeSpeedCapBytes(bytes);
+  speedCapBytes.value = next;
+  writePlayerSettings({ speedCapBytes: next });
+  mse.setSpeedCap(next);
 }
 
 // ── Local State ──────────────────────────────────────────────────
@@ -942,7 +976,10 @@ onMounted(async () => {
   }
 
   // The saved aggressiveness has to reach the buffer before the first track loads, or a hard-mode
-  // listener gets soft behaviour until they touch the panel again.
+  // listener gets soft behaviour until they touch the panel again. Same for budget and speed cap:
+  // these are browser-store settings now, not session-only stress dials.
+  mse.setCacheLimit(cacheSizeMb.value * 1024 * 1024);
+  mse.setSpeedCap(speedCapBytes.value);
   mse.setCacheMode(cacheMode.value);
 
   // Start time update loop
